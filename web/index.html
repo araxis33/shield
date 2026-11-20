@@ -139,7 +139,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   const ceilDiv = (a, b) => (a === 0n ? 0n : (a - 1n) / b + 1n);
   const isAddr = (a) => /^0x[0-9a-fA-F]{40}$/.test(a);
   const isHash = (h) => /^0x[0-9a-fA-F]{64}$/.test(h);
-  const st = { data: null, account: null, busy: false, need: 0n, epoch: 0 };
+  const st = { data: null, account: null, busy: false, need: 0n, epoch: 0, pending: null };
 
   class RpcError extends Error {}
   // an error whose message is our own HTML (a basescan link built from a checked hash)
@@ -150,7 +150,11 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     catch (e) { throw new RpcError("The Base node did not answer."); }
     if (!r.ok) throw new RpcError(r.status === 429 ? "The Base node is busy. Try again in a moment." : "The Base node answered " + r.status + ".");
     const j = await r.json();
-    if (j.error) { const e = new Error(j.error.message || "The node refused that call."); e.revert = true; throw e; }
+    if (j.error) {
+      const m = j.error.message || "The node refused that call.";
+      if (/rate|limit|busy|too many|429|timeout/i.test(m) && !/revert/i.test(m)) throw new RpcError("The Base node is busy. Try again in a moment.");
+      const e = new Error(m); e.revert = true; throw e;
+    }
     return j.result;
   }
   const callW = async (to, data, block) => words(await rpc("eth_call", [{ to, data }, block]));
@@ -253,10 +257,10 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   function hfText(wad) {
     if (wad == null) return "no debt";
     if (wad >= 10n ** 20n) return "> 100";
-    const x = Number(wad / 10n ** 12n) / 1e6; // six decimals, floored
-    if (wad < WAD && x >= 0.995) return "< 1 (" + x.toFixed(4) + ")";
-    if (wad >= WAD && wad < 1050000000000000000n && x >= 1.045) return x.toFixed(4);
-    return (Math.floor(x * 100) / 100).toFixed(2);
+    const floor4 = Number(wad / 10n ** 14n) / 1e4; // floored, never rounded up across 1 or 1.05
+    if (wad < WAD) return floor4 >= 0.99 ? "< 1 (" + floor4.toFixed(4) + ")" : (Math.floor(floor4 * 100) / 100).toFixed(2);
+    if (wad < 1050000000000000000n && floor4 >= 1.04) return floor4.toFixed(4);
+    return (Math.floor(floor4 * 100) / 100).toFixed(2);
   }
   const cls = (wad) => (wad == null ? "good" : wad < WAD ? "bad" : wad < 11n * 10n ** 17n ? "warn" : "good");
   const usdc6 = (a, full) => (Number(a) / 1e6).toLocaleString("en-US", { minimumFractionDigits: full ? 6 : 2, maximumFractionDigits: full ? 6 : 2 });
@@ -284,7 +288,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     el("hfBase").className = cls(noDebt ? null : hfS);
     el("debt").textContent = usdc6(d.usdcDebt);
     const W = weightedBps(d, (it) => it.price, 0n); // bps-scaled
-    const Dbps = d.debtRay * 10000n / 10n ** 27n; // debt value, bps-scaled, to compare with W
+    const Dbps = ceilDiv(d.debtRay * 10000n, 10n ** 27n); // debt value, bps-scaled, rounded up, to compare with W
     el("rows").innerHTML = d.items.filter((i) => i.isColl).map((it) => {
       const s = stressPrice(it);
       const wj = value(it.assets, it.price, it.dec) * it.cf;
@@ -329,6 +333,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     if (!d || d.debtRay === 0n) return;
     const field = el("addr").value.trim().toLowerCase();
     if (field !== d.user) { b.disabled = true; b.textContent = "Press Check for this address first"; return; }
+    if (st.pending) { b.disabled = true; b.textContent = "Waiting for an earlier transaction: press Check"; return; }
     if (!st.account) { b.disabled = false; b.textContent = "Connect the borrower's wallet to repay"; return; }
     if (st.account.toLowerCase() !== d.user) { b.disabled = true; b.textContent = "Connected wallet is not this borrower"; return; }
     b.disabled = st.need === 0n;
@@ -340,6 +345,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   async function check() {
     const a = el("addr").value.trim();
     st.epoch++; // any operation started for an earlier snapshot is now stale
+    st.pending = null;
     if (!isAddr(a)) { st.data = null; el("view").hidden = true; el("fix").hidden = true; status("st-read", "Paste a full 0x address.", true); return; }
     if (st.busy) return;
     st.busy = true; el("check").disabled = true;
@@ -400,7 +406,8 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
       }
       await new Promise((res) => setTimeout(res, 2000));
     }
-    throw htmlError("No receipt yet for the " + what + ". It may still go through: " + link + ". Check it before trying again.");
+    st.pending = hash;
+    throw htmlError("No receipt yet for the " + what + ". It may still go through: " + link + ". Press Check once it is final.");
   }
 
   async function repay() {
@@ -439,12 +446,24 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
       const again = st.need;
       bal = await balance();
       const allowed = await allowance();
+      if (again === 0n) throw new Error("Prices moved while the wallet was open: no repay is needed for this gap any more. Nothing was repaid. Aave may still take up to " + usdc6(allowed, true) + " USDC from this wallet if you repay later; you can set it to 0 in your wallet.");
       const want = again < bal ? again : bal;
       if (want > allowed) throw new Error("While the wallet was open the amount grew to " + usdc6(want, true) + " USDC; " + usdc6(allowed, true) + " is allowed. Press Repay again to allow the new amount. Nothing was repaid.");
       amt = want;
+      partial = "";
+      if (bal < again) {
+        const wGap2 = weightedBps(d, (it) => stressPrice(it).p, BigInt(gap));
+        partial = " This is a partial repay: you hold " + usdc6(bal) + " USDC. After the gap the health factor would be about " + hfText(hfAfterRepay(d, wGap2, amt)) + ", not 1.05.";
+      }
+      op.approved = allowed;
     }
     status("st-repay", "Signature " + (op.hashes.length ? "2 of 2" : "1 of 1") + ": repay " + usdc6(amt, true) + " USDC to Aave." + partial);
-    const { link } = await sendTx(op, SPOKE, SEL.repay + word(USDC_RESERVE) + word(amt) + addr(op.user), "repay");
+    let link;
+    try { ({ link } = await sendTx(op, SPOKE, SEL.repay + word(USDC_RESERVE) + word(amt) + addr(op.user), "repay")); }
+    catch (e) {
+      if (op.approved != null && !e.html) e.note = " Nothing was repaid. Aave may still take up to " + usdc6(op.approved, true) + " USDC from this wallet if you repay later; you can set it to 0 in your wallet.";
+      throw e;
+    }
     status("st-repay", "Repaid " + usdc6(amt, true) + " USDC: " + link + ". Reading the new health factor…", false, true);
     try {
       const after = await readPosition(op.user);
@@ -457,7 +476,12 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
 
   el("check").addEventListener("click", check);
   el("addr").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
-  el("addr").addEventListener("input", () => { st.epoch++; status("st-repay", ""); renderRepayButton(); });
+  el("addr").addEventListener("input", () => {
+    st.epoch++; status("st-repay", "");
+    const same = st.data && el("addr").value.trim().toLowerCase() === st.data.user;
+    el("view").hidden = !same; el("fix").hidden = !same || st.data.debtRay === 0n;
+    renderRepayButton();
+  });
   el("gap").addEventListener("change", () => { if (st.data) renderFix(); });
   el("connect").addEventListener("click", () => connect().catch((e) => status("st-read", esc(/rejected|denied/i.test(e.message || "") ? "Cancelled in the wallet." : e.message), true)));
   el("repay").addEventListener("click", async () => {
@@ -466,7 +490,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     st.busy = true; el("repay").disabled = true;
     try { await repay(); }
     catch (e) {
-      const m = /rejected|denied/i.test(e.message || "") ? "Cancelled in the wallet. That step was not sent." : e.message;
+      const m = (/rejected|denied/i.test(e.message || "") ? "Cancelled in the wallet. That step was not sent." : e.message) + (e.note || "");
       status("st-repay", e.html ? m : esc(m), true);
     } finally { st.busy = false; renderRepayButton(); }
   });
