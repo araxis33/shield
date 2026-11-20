@@ -83,7 +83,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     </div>
     <div class="row" style="margin-top:12px">
       <button id="repay" disabled>Connect the borrower's wallet to repay</button>
-      <span class="small dim">The USDC goes from your wallet straight to Aave. Two signatures: allow exactly this amount, then repay.</span>
+      <span class="small dim" id="sigs">The USDC goes from your wallet straight to Aave.</span>
     </div>
     <div id="st-repay" class="status"></div>
   </section>
@@ -92,8 +92,8 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     <b>How it reads</b>
     <ul class="notes">
       <li>All numbers come from the Aave V4 Equities Hub on Base (Spoke <a href="https://basescan.org/address/0x17905Db0e4A3514467539956c084180616AE7B8D">0x1790…7B8D</a>) at one block, with each borrower's own collateral factors.</li>
-      <li>Aave's stock prices stop over the weekend (Friday close to Sunday 20:00 New York) and then move in one step. The Base pools keep trading. The stress line uses whichever price is lower for each stock. It is a scenario, not a forecast.</li>
-      <li>Repaying sooner is the only protection: once the new price is printed, a liquidator can act in the same block.</li>
+      <li>Aave's stock prices did not update over the weekends we checked (Friday close to Sunday 20:00 New York) and then moved in steps. The Base pools keep trading. The stress line uses whichever price is lower for each stock, with the pool price in USDC turned into dollars at Aave's USDC price. It is a scenario, not a forecast.</li>
+      <li>Repay before the price moves: once a new price is printed, a liquidator can act in the same block.</li>
       <li>Not financial advice. This page never holds your funds.</li>
     </ul>
   </section>
@@ -106,8 +106,9 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   const RPC = LOCAL && new URLSearchParams(location.search).get("rpc") || "https://mainnet.base.org";
   const CHAIN = "0x2105";
   const SPOKE = "0x17905Db0e4A3514467539956c084180616AE7B8D";
+  const USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
   const USDC_RESERVE = 7;
-  const TARGET = 1050100000000000000n; // 1.0501: one basis point above 1.05, Aave rounds repaid shares down
+  const TARGET = 1050100000000000000n; // aim one basis point above 1.05: Aave rounds repaid shares down
   // Main USDC pool of each stock on Aero (factory 0x9CB2…7a76, tick spacing 10, all with a gauge)
   const POOLS = {
     "0xb200000000000000000000c2e324d24d7eecd1fb": "0xF5FCB9CDAFcE67d50AfEf298F88E709d2B946BA6", // AAPLc
@@ -124,8 +125,8 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   const SEL = {
     reserveCount: "0x99806546", reserve: "0x77778db3", account: "0xbf92857c", status: "0xa2a522f1", position: "0x869da9db",
     dynConfig: "0xec17bb00", supplied: "0xf1568a89", debt: "0x9b7172a6", oracle: "0x38013f02", price: "0xd45c35ff",
-    source: "0xe4337e38", latestRound: "0xfeaf968c", observe: "0x883bdbfd", token0: "0x0dfe1681", repay: "0xb1e8f8ef",
-    approve: "0x095ea7b3", allowance: "0xdd62ed3e", balanceOf: "0x70a08231", symbol: "0x95d89b41",
+    source: "0xe4337e38", latestRound: "0xfeaf968c", observe: "0x883bdbfd", token0: "0x0dfe1681", token1: "0xd21220a7",
+    repay: "0xb1e8f8ef", approve: "0x095ea7b3", allowance: "0xdd62ed3e", balanceOf: "0x70a08231", symbol: "0x95d89b41",
   };
   const el = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -135,286 +136,344 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   const big = (w) => BigInt("0x" + w);
   const sgn = (w) => BigInt.asIntN(256, big(w));
   const asAddr = (w) => "0x" + w.slice(24);
-  const ceilDiv = (a, b) => (a + b - 1n) / b;
+  const ceilDiv = (a, b) => (a === 0n ? 0n : (a - 1n) / b + 1n);
   const isAddr = (a) => /^0x[0-9a-fA-F]{40}$/.test(a);
-  const st = { block: null, data: null, account: null, busy: false };
+  const isHash = (h) => /^0x[0-9a-fA-F]{64}$/.test(h);
+  const st = { data: null, account: null, busy: false, need: 0n, epoch: 0 };
 
+  class RpcError extends Error {}
+  // an error whose message is our own HTML (a basescan link built from a checked hash)
+  const htmlError = (m) => { const e = new Error(m); e.html = true; return e; };
   async function rpc(method, params) {
-    const r = await fetch(RPC, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-    if (!r.ok) throw new Error(r.status === 429 ? "The Base node is busy. Try again in a moment." : "The Base node answered " + r.status + ".");
+    let r;
+    try { r = await fetch(RPC, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }); }
+    catch (e) { throw new RpcError("The Base node did not answer."); }
+    if (!r.ok) throw new RpcError(r.status === 429 ? "The Base node is busy. Try again in a moment." : "The Base node answered " + r.status + ".");
     const j = await r.json();
-    if (j.error) throw new Error(j.error.message || "The node refused that read.");
+    if (j.error) { const e = new Error(j.error.message || "The node refused that call."); e.revert = true; throw e; }
     return j.result;
   }
-  const call = (to, data, block) => rpc("eth_call", [{ to, data }, block || st.block || "latest"]);
-  async function callW(to, data, block) { return words(await call(to, data, block)); }
+  const callW = async (to, data, block) => words(await rpc("eth_call", [{ to, data }, block]));
 
-  // ---- reading one position at one block ----
-  let reserves = null, oracleAddr = null;
-  async function loadReserves(block) {
-    if (reserves) return reserves;
-    oracleAddr = asAddr((await callW(SPOKE, SEL.oracle, block))[0]);
-    const n = Number(big((await callW(SPOKE, SEL.reserveCount, block))[0]));
-    const out = [];
-    for (let r = 0; r < n; r++) {
-      const w = await callW(SPOKE, SEL.reserve + word(r), block);
-      const underlying = asAddr(w[0]);
-      let sym = "?";
-      try { const s = await call(underlying, SEL.symbol, block); const ws = words(s); const len = Number(big(ws[1])); sym = new TextDecoder().decode(Uint8Array.from((ws[2] || "").slice(0, len * 2).match(/.{2}/g).map((h) => parseInt(h, 16)))); } catch (e) {}
-      out.push({ id: r, underlying, dec: Number(big(w[3])), sym, source: asAddr((await callW(oracleAddr, SEL.source + word(r), block))[0]) });
-    }
-    reserves = out;
-    return out;
-  }
-
-  // 30-min TWAP of a stock in its USDC pool, in USDC per stock scaled to 8 decimals; null when unusable
-  async function poolPrice8(stockAddr, stockDec, block) {
-    const pool = POOLS[stockAddr.toLowerCase()];
-    if (!pool) return null;
-    try {
-      const t0 = asAddr((await callW(pool, SEL.token0, block))[0]).toLowerCase();
-      const data = SEL.observe + word(32) + word(2) + word(TWAP_SECONDS) + word(0);
-      const w = await callW(pool, data, block);
-      // returns (int56[] tickCumulatives, uint160[] secondsPerLiquidity): offsets, then [len, a, b]
-      const c0 = sgn(w[3]), c1 = sgn(w[4]);
-      let avg = (c1 - c0) / BigInt(TWAP_SECONDS);
-      if ((c1 - c0) < 0n && (c1 - c0) % BigInt(TWAP_SECONDS) !== 0n) avg -= 1n; // round toward -infinity
-      const tick = Number(avg);
-      const stockIs0 = t0 === stockAddr.toLowerCase();
-      const dec0 = stockIs0 ? stockDec : 6, dec1 = stockIs0 ? 6 : stockDec;
-      const p1per0 = Math.pow(1.0001, tick) * Math.pow(10, dec0 - dec1); // token1 per token0, human units
-      const usdcPerStock = stockIs0 ? p1per0 : 1 / p1per0;
-      if (!isFinite(usdcPerStock) || usdcPerStock <= 0) return null;
-      return { pool, price8: BigInt(Math.round(usdcPerStock * 1e8)) };
-    } catch (e) { return null; }
-  }
-
+  // ---- one position, every read at one block ----
   async function readPosition(user) {
     const block = await rpc("eth_blockNumber", []);
-    st.block = block;
-    const rs = await loadReserves(block);
+    const oracle = asAddr((await callW(SPOKE, SEL.oracle, block))[0]);
+    const n = Number(big((await callW(SPOKE, SEL.reserveCount, block))[0]));
     const acct = await callW(SPOKE, SEL.account + addr(user), block);
     const hf = big(acct[2]), debtRay = big(acct[4]);
+    const usdcPrice = big((await callW(oracle, SEL.price + word(USDC_RESERVE), block))[0]);
     const items = [];
-    for (const r of rs) {
-      const s = await callW(SPOKE, SEL.status + word(r.id) + addr(user), block);
+    for (let r = 0; r < n; r++) {
+      const s = await callW(SPOKE, SEL.status + word(r) + addr(user), block);
       const isColl = big(s[0]) === 1n, isBorrow = big(s[1]) === 1n;
       if (!isColl && !isBorrow) continue;
-      const price = big((await callW(oracleAddr, SEL.price + word(r.id), block))[0]);
-      const it = { ...r, price, isColl, isBorrow };
+      const rw = await callW(SPOKE, SEL.reserve + word(r), block);
+      const it = { id: r, underlying: asAddr(rw[0]), dec: Number(big(rw[3])), isColl, isBorrow, sym: "?" };
+      it.price = big((await callW(oracle, SEL.price + word(r), block))[0]);
+      try { // symbol: standard short ABI string; anything else shows "?"
+        const ws = await callW(it.underlying, SEL.symbol, block);
+        const len = Number(big(ws[1]));
+        if (len > 0 && len <= 32) it.sym = new TextDecoder().decode(Uint8Array.from(ws[2].slice(0, len * 2).match(/.{2}/g).map((h) => parseInt(h, 16))));
+      } catch (e) { if (e instanceof RpcError) throw e; }
       if (isColl) {
-        const key = big((await callW(SPOKE, SEL.position + word(r.id) + addr(user), block))[4]);
-        it.cf = big((await callW(SPOKE, SEL.dynConfig + word(r.id) + word(key), block))[0]);
-        it.assets = big((await callW(SPOKE, SEL.supplied + word(r.id) + addr(user), block))[0]);
-        try { it.updatedAt = Number(big((await callW(r.source, SEL.latestRound, block))[3])); } catch (e) { it.updatedAt = null; }
-        if (r.id !== USDC_RESERVE) it.pool = await poolPrice8(r.underlying, r.dec, block);
+        const key = big((await callW(SPOKE, SEL.position + word(r) + addr(user), block))[4]);
+        it.cf = big((await callW(SPOKE, SEL.dynConfig + word(r) + word(key), block))[0]);
+        it.assets = big((await callW(SPOKE, SEL.supplied + word(r) + addr(user), block))[0]);
+        const source = asAddr((await callW(oracle, SEL.source + word(r), block))[0]);
+        try { it.updatedAt = Number(big((await callW(source, SEL.latestRound, block))[3])); } catch (e) { if (e instanceof RpcError) throw e; it.updatedAt = null; }
+        if (r !== USDC_RESERVE) it.pool = await poolPrice(it, usdcPrice, block);
       }
-      if (isBorrow) it.debtAssets = big((await callW(SPOKE, SEL.debt + word(r.id) + addr(user), block))[0]);
+      if (isBorrow) it.debtAssets = big((await callW(SPOKE, SEL.debt + word(r) + addr(user), block))[0]);
       items.push(it);
     }
     const ts = Number(BigInt((await rpc("eth_getBlockByNumber", [block, false])).timestamp));
-    const usdc = rs[USDC_RESERVE];
-    const usdcPrice = big((await callW(oracleAddr, SEL.price + word(USDC_RESERVE), block))[0]);
-    return { user, block, ts, hf, debtRay, items, usdc, usdcPrice };
+    const usdc = items.find((i) => i.id === USDC_RESERVE) || { id: USDC_RESERVE, dec: 6, debtAssets: 0n };
+    return { user: user.toLowerCase(), block, ts, hf, debtRay, items, usdcPrice, usdcDec: usdc.dec || 6, usdcDebt: usdc.debtAssets || 0n };
   }
 
-  // ---- maths (Spoke units: value = amount * price8 * 10^(18 - dec); $1 = 1e26) ----
+  // 30-min TWAP of a stock in its USDC pool, turned into dollars (8 decimals) at Aave's USDC price.
+  // A node error stops the whole read; a pool that cannot give a price returns { why }.
+  async function poolPrice(it, usdcPrice, block) {
+    const pool = POOLS[it.underlying.toLowerCase()];
+    if (!pool) return { why: "no Base pool" };
+    const t0 = asAddr((await callW(pool, SEL.token0, block))[0]).toLowerCase();
+    const t1 = asAddr((await callW(pool, SEL.token1, block))[0]).toLowerCase();
+    const stock = it.underlying.toLowerCase();
+    if (!((t0 === stock && t1 === USDC) || (t1 === stock && t0 === USDC))) return { why: "pool is not stock/USDC" };
+    let w;
+    try { w = await callW(pool, SEL.observe + word(32) + word(2) + word(TWAP_SECONDS) + word(0), block); }
+    catch (e) { if (e instanceof RpcError) throw e; return { why: "pool has no 30-min history" }; }
+    const c0 = sgn(w[3]), c1 = sgn(w[4]), dt = BigInt(TWAP_SECONDS);
+    let avg = (c1 - c0) / dt;
+    if ((c1 - c0) < 0n && (c1 - c0) % dt !== 0n) avg -= 1n; // round toward -infinity
+    const stockIs0 = t0 === stock;
+    const dec0 = stockIs0 ? it.dec : 6, dec1 = stockIs0 ? 6 : it.dec;
+    const p1per0 = Math.pow(1.0001, Number(avg)) * Math.pow(10, dec0 - dec1);
+    const usdcPerStock = stockIs0 ? p1per0 : 1 / p1per0;
+    if (!isFinite(usdcPerStock) || usdcPerStock <= 0) return { why: "pool price unreadable" };
+    const usdc8 = BigInt(Math.round(usdcPerStock * 1e8));
+    return { pool, usdc8, price8: usdc8 * usdcPrice / 100000000n };
+  }
+
+  // ---- maths, in the Spoke's units: value = amount * price8 * 10^(18 - dec), $1 = 1e26 ----
   const value = (amount, price8, dec) => amount * price8 * 10n ** BigInt(18 - dec);
   function stressPrice(it) {
-    if (!it.pool) return { p: it.price, used: false, why: "no Base price" };
+    if (!it.pool || it.pool.why) return { p: it.price, used: false, why: it.pool ? it.pool.why : "no Base pool" };
     const diff = it.pool.price8 > it.price ? it.pool.price8 - it.price : it.price - it.pool.price8;
-    if (diff * 10000n > it.price * MAX_POOL_GAP_BPS) return { p: it.price, used: false, why: "pool too far from Aave" };
+    if (diff * 10000n > it.price * MAX_POOL_GAP_BPS) return { p: it.price, used: false, why: "ignored: more than 15% from Aave" };
     return { p: it.pool.price8 < it.price ? it.pool.price8 : it.price, used: true };
   }
-  // weighted collateral (value * CF/1e4) at chosen prices, times (1 - gapBps)
-  function weighted(d, priceOf, gapBps) {
-    let w = 0n;
-    for (const it of d.items) if (it.isColl && it.cf > 0n) w += value(it.assets, priceOf(it), it.dec) * it.cf * (10000n - gapBps) / 10000n / 10000n;
-    return w;
+  // Σ value × CF (bps), summed first and divided once, like the Spoke; then times (1 − gap)
+  function weightedBps(d, priceOf, gapBps) {
+    let s = 0n;
+    for (const it of d.items) if (it.isColl && it.cf > 0n) s += value(it.assets, priceOf(it), it.dec) * it.cf;
+    return s * (10000n - gapBps) / 10000n;
   }
-  const debtValue = (d) => ceilDiv(d.debtRay, 10n ** 27n);
-  const hfOf = (w, d) => (d.debtRay === 0n ? null : w * 10n ** 18n * 10n ** 27n / d.debtRay);
-  function needUsdc(d, wGap) {
-    const D = debtValue(d);
-    const keep = wGap * 10n ** 18n / TARGET;
-    if (keep >= D) return 0n;
-    return ceilDiv(D - keep, d.usdcPrice * 10n ** BigInt(18 - d.usdc.dec));
+  // HF exactly as the Spoke: (Σ value×CF bps → WAD) × RAY / debtRay
+  const hfOf = (wBps, d) => (d.debtRay === 0n ? null : wBps * 10n ** 14n * 10n ** 27n / d.debtRay);
+  // USDC to repay so that the HF after the gap reaches TARGET
+  function needUsdc(d, wBps) {
+    const keepRay = wBps * 10n ** 14n * 10n ** 27n / TARGET; // debtRay allowed at TARGET
+    if (keepRay >= d.debtRay) return 0n;
+    const valueRay = d.debtRay - keepRay;
+    const perUnitRay = d.usdcPrice * 10n ** BigInt(18 - d.usdcDec) * 10n ** 27n;
+    const amt = ceilDiv(valueRay, perUnitRay);
+    return amt >= d.usdcDebt ? d.usdcDebt : amt; // paying the whole debt: the Spoke's own total, rounded its way
+  }
+  function hfAfterRepay(d, wBps, amt) {
+    if (amt >= d.usdcDebt) return null; // no debt left
+    const paidRay = amt * d.usdcPrice * 10n ** BigInt(18 - d.usdcDec) * 10n ** 27n;
+    const left = d.debtRay - paidRay;
+    return left <= 0n ? null : wBps * 10n ** 14n * 10n ** 27n / left;
   }
 
   // ---- render ----
-  const f2 = (wad) => (wad == null ? "–" : (Number(wad / 10n ** 14n) / 1e4).toFixed(2));
-  const money = (v26) => "$" + (Number(v26 / 10n ** 22n) / 1e4).toLocaleString("en-US", { maximumFractionDigits: 0 });
-  const usdc6 = (a) => (Number(a) / 1e6).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const WAD = 10n ** 18n;
+  function hfText(wad) {
+    if (wad == null) return "no debt";
+    if (wad >= 10n ** 20n) return "> 100";
+    const x = Number(wad / 10n ** 12n) / 1e6; // six decimals, floored
+    if (wad < WAD && x >= 0.995) return "< 1 (" + x.toFixed(4) + ")";
+    if (wad >= WAD && wad < 1050000000000000000n && x >= 1.045) return x.toFixed(4);
+    return (Math.floor(x * 100) / 100).toFixed(2);
+  }
+  const cls = (wad) => (wad == null ? "good" : wad < WAD ? "bad" : wad < 11n * 10n ** 17n ? "warn" : "good");
+  const usdc6 = (a, full) => (Number(a) / 1e6).toLocaleString("en-US", { minimumFractionDigits: full ? 6 : 2, maximumFractionDigits: full ? 6 : 2 });
   const px = (p8) => "$" + (Number(p8) / 1e8).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const cls = (wad) => (wad == null ? "" : wad < 10n ** 18n ? "bad" : wad < 11n * 10n ** 17n ? "warn" : "good");
   function age(ts, now) {
     if (!ts) return "–";
     const h = (now - ts) / 3600;
-    return h < 1 ? Math.round(h * 60) + " min" : h < 48 ? h.toFixed(1) + " h" : (h / 24).toFixed(1) + " d";
+    return h < 1 ? Math.max(0, Math.round(h * 60)) + " min" : h < 48 ? h.toFixed(1) + " h" : (h / 24).toFixed(1) + " d";
   }
 
   function render() {
     const d = st.data;
     el("view").hidden = false;
     const noDebt = d.debtRay === 0n;
-    el("hf").textContent = noDebt ? "no debt" : f2(d.hf);
+    el("hf").textContent = noDebt ? "no debt" : hfText(d.hf);
     el("hf").className = cls(noDebt ? null : d.hf);
-    const wStress = weighted(d, (it) => stressPrice(it).p, 0n);
+    const wStress = weightedBps(d, (it) => stressPrice(it).p, 0n);
     const hfS = hfOf(wStress, d);
-    el("hfBase").textContent = noDebt ? "–" : f2(hfS);
-    el("hfBase").className = cls(hfS);
-    el("debt").textContent = noDebt ? "0" : usdc6((d.items.find((i) => i.id === USDC_RESERVE && i.isBorrow) || { debtAssets: 0n }).debtAssets);
-    // per-stock rows
-    const W = weighted(d, (it) => it.price, 0n), D = debtValue(d);
-    let covered = 0n, total = 0n;
+    let coveredW = 0n, totalW = 0n, ignored = 0;
+    for (const it of d.items) if (it.isColl && it.cf > 0n) {
+      const w = value(it.assets, it.price, it.dec) * it.cf;
+      totalW += w; if (stressPrice(it).used) coveredW += w; else ignored++;
+    }
+    el("hfBase").textContent = noDebt ? "–" : hfText(hfS) + (ignored ? " *" : "");
+    el("hfBase").className = cls(noDebt ? null : hfS);
+    el("debt").textContent = usdc6(d.usdcDebt);
+    const W = weightedBps(d, (it) => it.price, 0n); // bps-scaled
+    const Dbps = d.debtRay * 10000n / 10n ** 27n; // debt value, bps-scaled, to compare with W
     el("rows").innerHTML = d.items.filter((i) => i.isColl).map((it) => {
-      const v = value(it.assets, it.price, it.dec);
       const s = stressPrice(it);
-      total += v; if (s.used) covered += v;
-      const wj = v * it.cf / 10000n;
+      const wj = value(it.assets, it.price, it.dec) * it.cf;
       let fall = "–";
       if (!noDebt && wj > 0n) {
-        if (W <= D) fall = '<span class="bad">already below 1</span>';
+        if (W < Dbps) fall = '<span class="bad">below 1 now</span>';
         else {
-          const bps = (W - D) * 10000n / wj;
-          fall = bps >= 10000n ? "not alone" : '<span class="' + (bps < 1000n ? "bad" : bps < 2000n ? "warn" : "") + '">−' + (Number(bps) / 100).toFixed(1) + "% (" + px(it.price * (10000n - bps) / 10000n) + ")</span>";
+          const bps = (W - Dbps) * 10000n / wj; // fall of this stock alone that brings HF to 1
+          fall = bps > 10000n ? "even to zero, not alone" : '<span class="' + (bps < 1000n ? "bad" : bps < 2000n ? "warn" : "") + '">−' + (Number(bps) / 100).toFixed(1) + "% (" + px(it.price * (10000n - bps) / 10000n) + ")</span>";
         }
-      }
-      const gap = it.pool ? Number((it.pool.price8 - it.price) * 10000n / it.price) / 100 : null;
+      } else if (it.cf === 0n) fall = '<span class="dim">not counted (factor 0)</span>';
+      const hasPool = it.pool && !it.pool.why;
+      const gap = hasPool ? Number((it.pool.price8 - it.price) * 10000n / it.price) / 100 : null;
       return "<tr><td>" + esc(it.sym) + "</td><td>" + (Number(it.assets) / 10 ** it.dec).toLocaleString("en-US", { maximumFractionDigits: 4 }) + "</td><td>" + px(it.price) +
-        "</td><td>" + age(it.updatedAt, d.ts) + "</td><td>" + (it.pool ? px(it.pool.price8) : '<span class="dim">' + esc(s.why) + "</span>") +
-        "</td><td>" + (gap == null ? "–" : '<span class="' + (gap < 0 ? "bad" : "good") + '">' + (gap > 0 ? "+" : "") + gap.toFixed(2) + "%</span>") +
-        (s.used || !it.pool ? "" : ' <span class="dim">(ignored)</span>') + "</td><td>" + fall + "</td></tr>";
+        "</td><td>" + age(it.updatedAt, d.ts) + "</td><td>" + (hasPool ? px(it.pool.price8) : '<span class="dim">' + esc(s.why) + "</span>") +
+        "</td><td>" + (gap == null ? "–" : '<span class="' + (gap < 0 ? "bad" : "good") + '">' + (gap > 0 ? "+" : "") + gap.toFixed(2) + "%</span>" + (s.used ? "" : ' <span class="dim">(ignored)</span>')) +
+        "</td><td>" + fall + "</td></tr>";
     }).join("") || '<tr><td colspan="7" class="dim">No collateral.</td></tr>';
-    el("cover").textContent = total === 0n ? "" : "Base pool prices cover " + Math.round(Number(covered * 100n / total)) + "% of this collateral by value. Block " + parseInt(d.block, 16) +
-      ", " + new Date(d.ts * 1000).toUTCString().replace(" GMT", " UTC") + ". \"Alone may fall\": how far that one stock may drop before the health factor reaches 1, the others unchanged.";
+    const pct = totalW === 0n ? 0 : Math.round(Number(coveredW * 100n / totalW));
+    el("cover").textContent = (totalW === 0n ? "" : "Base pool prices cover " + pct + "% of the collateral that counts for the health factor" + (ignored ? " (* the stress line is incomplete: the rest uses Aave prices)" : "") + ". ") +
+      "Block " + parseInt(d.block, 16) + ", " + new Date(d.ts * 1000).toUTCString().replace(" GMT", " UTC") + ". \"Alone may fall\": how far that one stock may drop before the health factor reaches 1, the others unchanged.";
     el("fix").hidden = noDebt;
     if (!noDebt) renderFix();
-    renderRepayButton();
   }
 
   function renderFix() {
     const d = st.data, g = BigInt(el("gap").value);
-    const wGap = weighted(d, (it) => stressPrice(it).p, g);
+    const wGap = weightedBps(d, (it) => stressPrice(it).p, g);
     const hfG = hfOf(wGap, d);
-    el("hfGap").textContent = f2(hfG); el("hfGap").className = cls(hfG);
-    const need = needUsdc(d, wGap);
-    st.need = need;
-    el("need").textContent = need === 0n ? "nothing" : usdc6(need);
-    const repaidValue = need * d.usdcPrice * 10n ** BigInt(18 - d.usdc.dec);
-    const after = d.debtRay - repaidValue * 10n ** 27n;
-    const hfA = after <= 0n ? null : wGap * 10n ** 18n * 10n ** 27n / after;
-    el("hfAfter").textContent = need === 0n ? f2(hfG) : hfA == null ? "no debt" : "≈ " + f2(hfA);
-    el("hfAfter").className = cls(need === 0n ? hfG : hfA);
+    el("hfGap").textContent = hfText(hfG); el("hfGap").className = cls(hfG);
+    st.need = needUsdc(d, wGap);
+    st.needGap = el("gap").value;
+    el("need").textContent = st.need === 0n ? "nothing" : usdc6(st.need);
+    const hfA = st.need === 0n ? hfG : hfAfterRepay(d, wGap, st.need);
+    el("hfAfter").textContent = (st.need === 0n ? "" : "≈ ") + hfText(hfA);
+    el("hfAfter").className = cls(hfA);
+    renderRepayButton();
   }
 
   function renderRepayButton() {
     const b = el("repay"), d = st.data;
     if (!d || d.debtRay === 0n) return;
+    const field = el("addr").value.trim().toLowerCase();
+    if (field !== d.user) { b.disabled = true; b.textContent = "Press Check for this address first"; return; }
     if (!st.account) { b.disabled = false; b.textContent = "Connect the borrower's wallet to repay"; return; }
-    if (st.account.toLowerCase() !== d.user.toLowerCase()) { b.disabled = true; b.textContent = "Connected wallet is not this borrower"; return; }
-    b.disabled = !st.need || st.need === 0n;
-    b.textContent = st.need && st.need > 0n ? "Repay " + usdc6(st.need) + " USDC" : "Nothing to repay for this gap";
+    if (st.account.toLowerCase() !== d.user) { b.disabled = true; b.textContent = "Connected wallet is not this borrower"; return; }
+    b.disabled = st.need === 0n;
+    b.textContent = st.need > 0n ? "Repay " + usdc6(st.need) + " USDC" : "Nothing to repay for this gap";
   }
 
   function status(id, html, bad, good) { const s = el(id); s.className = "status" + (bad ? " bad" : "") + (good ? " good" : ""); s.innerHTML = html; }
 
   async function check() {
     const a = el("addr").value.trim();
-    if (!isAddr(a)) { status("st-read", "Paste a full 0x address.", true); return; }
+    st.epoch++; // any operation started for an earlier snapshot is now stale
+    if (!isAddr(a)) { st.data = null; el("view").hidden = true; el("fix").hidden = true; status("st-read", "Paste a full 0x address.", true); return; }
     if (st.busy) return;
     st.busy = true; el("check").disabled = true;
     status("st-read", "Reading the position on Base…");
     try {
       if ((await rpc("eth_chainId", [])) !== CHAIN) throw new Error("The node is not on Base.");
-      st.data = await readPosition(a);
+      const d = await readPosition(a);
+      if (el("addr").value.trim().toLowerCase() !== d.user) return; // the field changed while reading
+      st.data = d;
       status("st-read", "");
       render();
       try { history.replaceState(null, "", "#" + a); } catch (e) {}
     } catch (e) {
-      el("view").hidden = true; el("fix").hidden = true;
+      st.data = null; el("view").hidden = true; el("fix").hidden = true;
       status("st-read", "Could not read the position, nothing is shown: " + esc(e.message), true);
     } finally { st.busy = false; el("check").disabled = false; }
   }
 
   // ---- wallet ----
   const provider = () => window.ethereum || null;
-  async function onBase(p) {
-    if ((await p.request({ method: "eth_chainId" })) !== CHAIN) {
-      try { await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN }] }); }
-      catch (e) { throw new Error("Switch the wallet to Base first."); }
-      if ((await p.request({ method: "eth_chainId" })) !== CHAIN) throw new Error("Switch the wallet to Base first.");
-    }
-  }
+  async function walletChain(p) { return await p.request({ method: "eth_chainId" }); }
   async function connect() {
     const p = provider();
     if (!p) throw new Error("No wallet in this browser. Open the page in Coinbase Wallet or Rabby.");
     st.account = (await p.request({ method: "eth_requestAccounts" }))[0];
-    await onBase(p);
+    if ((await walletChain(p)) !== CHAIN) {
+      try { await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN }] }); } catch (e) {}
+      if ((await walletChain(p)) !== CHAIN) throw new Error("Switch the wallet to Base first.");
+    }
     el("connect").textContent = st.account.slice(0, 6) + "…" + st.account.slice(-4);
     if (!el("addr").value.trim()) el("addr").value = st.account;
     await check();
   }
-  async function sendTx(to, data, what) {
+
+  // One repay operation is pinned to: this borrower, this wallet account, Base, and the snapshot epoch.
+  async function assertContext(op) {
     const p = provider();
-    await onBase(p);
-    const now = (await p.request({ method: "eth_accounts" }))[0];
-    if (!now || now.toLowerCase() !== st.account.toLowerCase()) throw new Error("The wallet switched account. Nothing was sent.");
-    try { await rpc("eth_call", [{ from: st.account, to, data }, "latest"]); }
-    catch (e) { throw new Error("The " + what + " would fail onchain (" + (e.message || "no reason") + "). Nothing was sent."); }
-    const hash = await p.request({ method: "eth_sendTransaction", params: [{ from: st.account, to, data }] });
-    for (let i = 0; i < 90; i++) {
-      const r = await rpc("eth_getTransactionReceipt", [hash]).catch(() => null);
+    const acc = ((await p.request({ method: "eth_accounts" }))[0] || "").toLowerCase();
+    if (acc !== op.from) throw new Error("The wallet switched account. Nothing more was sent.");
+    if ((await walletChain(p)) !== CHAIN) throw new Error("The wallet left Base. Nothing more was sent.");
+    if (st.epoch !== op.epoch || el("addr").value.trim().toLowerCase() !== op.user) throw new Error("The address changed. Nothing more was sent.");
+  }
+  async function sendTx(op, to, data, what) {
+    await assertContext(op);
+    try { await rpc("eth_call", [{ from: op.from, to, data }, "latest"]); }
+    catch (e) { if (e instanceof RpcError) throw e; throw new Error("The " + what + " would fail onchain (" + (e.message || "no reason") + "). It was not sent."); }
+    await assertContext(op);
+    const hash = await provider().request({ method: "eth_sendTransaction", params: [{ from: op.from, to, data }] });
+    if (!isHash(hash)) throw new Error("The wallet returned no transaction hash.");
+    op.hashes.push(hash);
+    const link = '<a href="https://basescan.org/tx/' + hash + '">' + hash.slice(0, 10) + "…</a>";
+    for (let i = 0; i < 120; i++) {
+      let r = null;
+      try { r = await rpc("eth_getTransactionReceipt", [hash]); } catch (e) { if (!(e instanceof RpcError)) throw e; }
       if (r && r.blockNumber) {
-        if (r.status === "0x0") throw new Error("The " + what + " reverted onchain: " + hash);
-        return { hash, r };
+        if (r.status !== "0x1") throw htmlError("The " + what + " failed onchain: " + link);
+        return { hash, link };
       }
       await new Promise((res) => setTimeout(res, 2000));
     }
-    throw new Error("Timed out waiting for the " + what + ". Check " + hash + " on basescan.org.");
+    throw htmlError("No receipt yet for the " + what + ". It may still go through: " + link + ". Check it before trying again.");
   }
 
   async function repay() {
-    const d = st.data, usdc = d.usdc.underlying;
-    if (!st.account || st.account.toLowerCase() !== d.user.toLowerCase()) throw new Error("Connect the borrower's own wallet.");
-    const gapAtStart = el("gap").value;
-    // re-read: debt grows every second
-    st.data = await readPosition(d.user); render();
-    if (el("gap").value !== gapAtStart) throw new Error("The gap changed. Check the new amount.");
+    const d0 = st.data;
+    if (!d0 || !st.account) throw new Error("Connect the borrower's own wallet.");
+    const op = { from: st.account.toLowerCase(), user: d0.user, epoch: st.epoch, hashes: [] };
+    if (op.from !== op.user) throw new Error("Connect the borrower's own wallet.");
+    const gap = el("gap").value;
+    const usdc = USDC;
+    // fresh numbers: debt grows every second
+    const fresh = async () => {
+      const d = await readPosition(op.user);
+      st.data = d; render();
+      if (el("gap").value !== gap) throw new Error("The gap changed. Check the new amount and press Repay again.");
+      return d;
+    };
+    let d = await fresh();
+    const hfBefore = d.hf;
     let amt = st.need;
-    if (!amt || amt === 0n) throw new Error("Nothing to repay for this gap.");
-    const bal = big((await callW(usdc, SEL.balanceOf + addr(st.account), "latest"))[0]);
+    if (amt === 0n) throw new Error("Nothing to repay for this gap.");
+    const balance = async () => big((await callW(usdc, SEL.balanceOf + addr(op.from), "latest"))[0]);
+    const allowance = async () => big((await callW(usdc, SEL.allowance + addr(op.from) + addr(SPOKE), "latest"))[0]);
+    let bal = await balance();
     if (bal === 0n) throw new Error("This wallet has no USDC on Base.");
-    if (bal < amt) { amt = bal; status("st-repay", "You hold " + usdc6(bal) + " USDC, less than needed. Repaying what you have; the health factor will be lower than 1.05 after the gap."); }
-    const allowance = big((await callW(usdc, SEL.allowance + addr(st.account) + addr(SPOKE), "latest"))[0]);
-    if (allowance < amt) {
-      status("st-repay", "Step 1 of 2: allow Aave to take exactly " + usdc6(amt) + " USDC. Confirm in your wallet…");
-      await sendTx(usdc, SEL.approve + addr(SPOKE) + word(amt), "approval");
-      // the debt kept growing while the wallet was open: the repay is capped at the allowance just given
+    let partial = "";
+    if (bal < amt) {
+      amt = bal;
+      const wGap = weightedBps(d, (it) => stressPrice(it).p, BigInt(gap));
+      partial = " This is a partial repay: you hold " + usdc6(bal) + " USDC. After the gap the health factor would be about " + hfText(hfAfterRepay(d, wGap, amt)) + ", not 1.05.";
     }
-    status("st-repay", "Step 2 of 2: repay " + usdc6(amt) + " USDC to Aave. Confirm in your wallet…");
-    const { hash } = await sendTx(SPOKE, SEL.repay + word(USDC_RESERVE) + word(amt) + addr(d.user), "repay");
-    const before = d.hf;
-    st.data = await readPosition(d.user); render();
-    status("st-repay", 'Repaid. Health factor ' + f2(before) + " → " + f2(st.data.hf) + '. <a href="https://basescan.org/tx/' + hash + '">Transaction</a>', false, true);
+    if ((await allowance()) < amt) {
+      status("st-repay", "Signature 1 of 2: allow Aave to take exactly " + usdc6(amt, true) + " USDC." + partial);
+      await sendTx(op, usdc, SEL.approve + addr(SPOKE) + word(amt), "approval");
+      // the wallet may have stayed open a while: read again before the repay
+      d = await fresh();
+      const again = st.need;
+      bal = await balance();
+      const allowed = await allowance();
+      const want = again < bal ? again : bal;
+      if (want > allowed) throw new Error("While the wallet was open the amount grew to " + usdc6(want, true) + " USDC; " + usdc6(allowed, true) + " is allowed. Press Repay again to allow the new amount. Nothing was repaid.");
+      amt = want;
+    }
+    status("st-repay", "Signature " + (op.hashes.length ? "2 of 2" : "1 of 1") + ": repay " + usdc6(amt, true) + " USDC to Aave." + partial);
+    const { link } = await sendTx(op, SPOKE, SEL.repay + word(USDC_RESERVE) + word(amt) + addr(op.user), "repay");
+    status("st-repay", "Repaid " + usdc6(amt, true) + " USDC: " + link + ". Reading the new health factor…", false, true);
+    try {
+      const after = await readPosition(op.user);
+      st.data = after; render();
+      status("st-repay", "Repaid " + usdc6(amt, true) + " USDC: " + link + ". Health factor " + hfText(hfBefore) + " → " + hfText(after.debtRay === 0n ? null : after.hf) + ".", false, true);
+    } catch (e) {
+      status("st-repay", "Repaid " + usdc6(amt, true) + " USDC: " + link + ". The new health factor could not be read yet; press Check.", false, true);
+    }
   }
 
   el("check").addEventListener("click", check);
   el("addr").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
-  el("gap").addEventListener("change", () => { if (st.data) { renderFix(); renderRepayButton(); } });
+  el("addr").addEventListener("input", () => { st.epoch++; status("st-repay", ""); renderRepayButton(); });
+  el("gap").addEventListener("change", () => { if (st.data) renderFix(); });
   el("connect").addEventListener("click", () => connect().catch((e) => status("st-read", esc(/rejected|denied/i.test(e.message || "") ? "Cancelled in the wallet." : e.message), true)));
   el("repay").addEventListener("click", async () => {
     if (st.busy) return;
     if (!st.account) { connect().catch((e) => status("st-repay", esc(e.message), true)); return; }
     st.busy = true; el("repay").disabled = true;
     try { await repay(); }
-    catch (e) { status("st-repay", esc(/rejected|denied/i.test(e.message || "") ? "Cancelled in the wallet. The repay was not sent." : e.message), true); }
-    finally { st.busy = false; renderRepayButton(); }
+    catch (e) {
+      const m = /rejected|denied/i.test(e.message || "") ? "Cancelled in the wallet. That step was not sent." : e.message;
+      status("st-repay", e.html ? m : esc(m), true);
+    } finally { st.busy = false; renderRepayButton(); }
   });
   const p = provider();
   if (p && p.on) {
-    p.on("accountsChanged", (a) => { st.account = a && a[0] ? a[0] : null; el("connect").textContent = st.account ? st.account.slice(0, 6) + "…" + st.account.slice(-4) : "Connect wallet"; status("st-repay", ""); renderRepayButton(); });
-    p.on("chainChanged", () => { status("st-repay", "The wallet changed network. Check again before repaying."); });
+    p.on("accountsChanged", (a) => { st.epoch++; st.account = a && a[0] ? a[0] : null; el("connect").textContent = st.account ? st.account.slice(0, 6) + "…" + st.account.slice(-4) : "Connect wallet"; renderRepayButton(); });
+    p.on("chainChanged", () => { st.epoch++; status("st-repay", "The wallet changed network. Press Check before repaying."); });
   }
   const h = location.hash.slice(1);
   if (isAddr(h)) { el("addr").value = h; check(); }
