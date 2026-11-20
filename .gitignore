@@ -1,3 +1,5 @@
 out/
 cache/
 research/aave_logs.json
+.demo-state
+.demo-anvil.log

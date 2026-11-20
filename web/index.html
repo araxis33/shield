@@ -439,8 +439,11 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
       partial = " This is a partial repay: you hold " + usdc6(bal) + " USDC. After the gap the health factor would be about " + hfText(hfAfterRepay(d, wGap, amt)) + ", not 1.05.";
     }
     if ((await allowance()) < amt) {
-      status("st-repay", "Signature 1 of 2: allow Aave to take exactly " + usdc6(amt, true) + " USDC." + partial);
-      await sendTx(op, usdc, SEL.approve + addr(SPOKE) + word(amt), "approval");
+      // interest accrues every block: allow 0.5% (at least 1 cent) more than today's amount, within the balance
+      let cap = amt + (amt / 200n > 10000n ? amt / 200n : 10000n);
+      if (cap > bal) cap = bal;
+      status("st-repay", "Signature 1 of 2: allow Aave to take up to " + usdc6(cap, true) + " USDC (today's amount plus 0.5% for interest that accrues while you sign)." + partial);
+      await sendTx(op, usdc, SEL.approve + addr(SPOKE) + word(cap), "approval");
       // the wallet may have stayed open a while: read again before the repay
       d = await fresh();
       const again = st.need;
