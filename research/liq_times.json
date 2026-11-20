@@ -1,0 +1,352 @@
+[
+ {
+  "t": "2026-09-25T14:15:11+00:00",
+  "dow": "Fri",
+  "hhmm": "14:15",
+  "coll": "TSLA",
+  "debt_usdc": 0.34,
+  "user": "0xc0e08164023406b322c6f9dff7312f5693ae386f",
+  "tx": "0xc19f69a6f03bc7f2edd235e180fa1a1b4160c6547f06fe311c3a05c8d0997382",
+  "block": 51778182
+ },
+ {
+  "t": "2026-10-01T14:21:59+00:00",
+  "dow": "Thu",
+  "hhmm": "14:21",
+  "coll": "MSFT",
+  "debt_usdc": 9.87,
+  "user": "0x26d595dddbad81bf976ef6f24686a12a800b141f",
+  "tx": "0xeae435367fbfdd29003822bce54b02f1bb692a412d0790fbcc6400dc7dcfa035",
+  "block": 52037586
+ },
+ {
+  "t": "2026-10-08T17:30:53+00:00",
+  "dow": "Thu",
+  "hhmm": "17:30",
+  "coll": "TSLA",
+  "debt_usdc": 137.08,
+  "user": "0x37619647c8efc03b1f9dce061890316073b3a051",
+  "tx": "0x98dbba0de970f877cb0410d7c762ac1370d5451802f66419cf770c3b21228538",
+  "block": 52345653
+ },
+ {
+  "t": "2026-10-14T17:52:19+00:00",
+  "dow": "Wed",
+  "hhmm": "17:52",
+  "coll": "NVDA",
+  "debt_usdc": 2.78,
+  "user": "0x23cad661e2c5f4290a9d1b08209a2a03d7426e29",
+  "tx": "0xdd4cf22e3b2d6096bbe392a97288309a9457977e2046b9e95e968771709cd762",
+  "block": 52605496
+ },
+ {
+  "t": "2026-10-16T17:19:09+00:00",
+  "dow": "Fri",
+  "hhmm": "17:19",
+  "coll": "TSLA",
+  "debt_usdc": 9.49,
+  "user": "0xd437554a4ac44ac4ab8509d2203a0e35b7284751",
+  "tx": "0x8f060fc699b5ccd9ffd5966391b27fb3d4e75316680f04c823e33e2a063e2b53",
+  "block": 52690901
+ },
+ {
+  "t": "2026-10-21T22:40:59+00:00",
+  "dow": "Wed",
+  "hhmm": "22:40",
+  "coll": "AMZN",
+  "debt_usdc": 151.34,
+  "user": "0xc2f806a06cdef2b5a07878a336574b5e483971f5",
+  "tx": "0xb5da2ff3b0360edd89c799c40017cce9e2ee59f6c738f59db42eab7032f1f2a2",
+  "block": 52916556
+ },
+ {
+  "t": "2026-10-21T22:48:59+00:00",
+  "dow": "Wed",
+  "hhmm": "22:48",
+  "coll": "GOOGL",
+  "debt_usdc": 123.52,
+  "user": "0xc2f806a06cdef2b5a07878a336574b5e483971f5",
+  "tx": "0xbb555aeb6c1ee53188a9c5915ef3cfbff750af60235fc6698acba941bec1e158",
+  "block": 52916796
+ },
+ {
+  "t": "2026-10-21T22:52:59+00:00",
+  "dow": "Wed",
+  "hhmm": "22:52",
+  "coll": "MSFT",
+  "debt_usdc": 102.49,
+  "user": "0xc2f806a06cdef2b5a07878a336574b5e483971f5",
+  "tx": "0xd703f2e692073a8d9d62e40b1a3c6c69015fd9731951454af0dfd6c2379aa00b",
+  "block": 52916916
+ },
+ {
+  "t": "2026-10-23T02:38:39+00:00",
+  "dow": "Fri",
+  "hhmm": "02:38",
+  "coll": "NVDA",
+  "debt_usdc": 457.54,
+  "user": "0x897015e6deb68063db6889569d9d4e3cd616e461",
+  "tx": "0x9864a158e779511d47165d6a2cdb0c627fe00fa67d450acba0bb164b643112db",
+  "block": 52966886
+ },
+ {
+  "t": "2026-10-26T00:00:27+00:00",
+  "dow": "Mon",
+  "hhmm": "00:00",
+  "coll": "AAPL",
+  "debt_usdc": 693.16,
+  "user": "0xf12a167793205316d79013b317fac751628e6a95",
+  "tx": "0x411df8aa74b618406a6a606a917dc792c687dbb5fa22f23f8b948afdd57271f2",
+  "block": 53091740
+ },
+ {
+  "t": "2026-10-28T20:02:37+00:00",
+  "dow": "Wed",
+  "hhmm": "20:02",
+  "coll": "GOOGL",
+  "debt_usdc": 5.16,
+  "user": "0xff13dc32aca90b3d61058ea26df1d895f842ee1f",
+  "tx": "0x846b957e67395d0a9a87f02c80f1530d5322a6c6aa9f263d6cf79eddbcd0b51c",
+  "block": 53214205
+ },
+ {
+  "t": "2026-10-28T20:02:37+00:00",
+  "dow": "Wed",
+  "hhmm": "20:02",
+  "coll": "GOOGL",
+  "debt_usdc": 2.99,
+  "user": "0x3a84f615dc423fd7fdd0075bcec630fb87cfa2a5",
+  "tx": "0xb33a9032947fa24c8370065fde7c24a0326235f2b337e1b11d8f76bcf0176774",
+  "block": 53214205
+ },
+ {
+  "t": "2026-10-29T13:35:15+00:00",
+  "dow": "Thu",
+  "hhmm": "13:35",
+  "coll": "TSLA",
+  "debt_usdc": 10.07,
+  "user": "0x26d595dddbad81bf976ef6f24686a12a800b141f",
+  "tx": "0x597bc3ae89cd98f327385e1dc338a86e8bbf90b7e8ca6d7a3e10376482f8c635",
+  "block": 53245784
+ },
+ {
+  "t": "2026-10-29T13:35:41+00:00",
+  "dow": "Thu",
+  "hhmm": "13:35",
+  "coll": "MSFT",
+  "debt_usdc": 21.31,
+  "user": "0x0c30a81525b5b91bab9062084c43fa410bc3ab00",
+  "tx": "0x02244c8fcbeaac26e7f3d9bb2ad0d6a28b0d04c27dee51c184ed210c58e12bfd",
+  "block": 53245797
+ },
+ {
+  "t": "2026-10-29T20:01:27+00:00",
+  "dow": "Thu",
+  "hhmm": "20:01",
+  "coll": "AMZN",
+  "debt_usdc": 201.32,
+  "user": "0xdc9528e73f770c93ed7895a2928d52ea1d18e1a7",
+  "tx": "0x469c7aa5ed8a92edd568ae04658bf845d2d6192bd627f8d466b023aee7ff7295",
+  "block": 53257370
+ },
+ {
+  "t": "2026-10-29T20:01:29+00:00",
+  "dow": "Thu",
+  "hhmm": "20:01",
+  "coll": "AMZN",
+  "debt_usdc": 170.25,
+  "user": "0xf90d85829a0c655b07cfe83f50959a07bb1dc665",
+  "tx": "0xe68649ee2d89a2ae7002e7dd10abfbf37e3967c1ca773b63833c0fd6a4747f98",
+  "block": 53257371
+ },
+ {
+  "t": "2026-10-30T08:48:15+00:00",
+  "dow": "Fri",
+  "hhmm": "08:48",
+  "coll": "MSFT",
+  "debt_usdc": 0.04,
+  "user": "0xd8575a837bb15cb47ce643c77e7f327c40284d59",
+  "tx": "0x234c6a9f2296cef9287297015891cceda9743a5814ac99affd7d35432a7a0e46",
+  "block": 53280374
+ },
+ {
+  "t": "2026-11-02T22:31:15+00:00",
+  "dow": "Mon",
+  "hhmm": "22:31",
+  "coll": "AAPL",
+  "debt_usdc": 4.16,
+  "user": "0x96819fed472ef0a07183ab5edb6778936cf6ed7b",
+  "tx": "0x2faed25608279454a1d69cc50c4d382e80436e164a6a0ec2226ea7fc78d6bc76",
+  "block": 53434664
+ },
+ {
+  "t": "2026-11-05T14:41:23+00:00",
+  "dow": "Thu",
+  "hhmm": "14:41",
+  "coll": "TSLA",
+  "debt_usdc": 79.17,
+  "user": "0xb8cd2cc5b8ce8d6a3ec43f998528a5209a9f7e8d",
+  "tx": "0xbedd7bcc7387c25fb7884fc95a399928ca8e78a209869e5b47e6a7ea11af9d38",
+  "block": 53550168
+ },
+ {
+  "t": "2026-11-05T14:56:15+00:00",
+  "dow": "Thu",
+  "hhmm": "14:56",
+  "coll": "NVDA",
+  "debt_usdc": 150.07,
+  "user": "0x41dc9b870fd51d5b8030bd8b3aacb0778e8b1604",
+  "tx": "0xfb749035642b74a251f7936123416eb3b11f995d7df73819311bc546e4fc5885",
+  "block": 53550614
+ },
+ {
+  "t": "2026-11-05T15:50:57+00:00",
+  "dow": "Thu",
+  "hhmm": "15:50",
+  "coll": "TSLA",
+  "debt_usdc": 145.42,
+  "user": "0xa2d8f64ca3c14a5801cdf2a8fee51a82d0a3741d",
+  "tx": "0x72fda86a2a1f4cf43b6b8b2488f2ae9c9703cbeddc3a01ab1bdf11146517265c",
+  "block": 53552255
+ },
+ {
+  "t": "2026-11-05T21:06:57+00:00",
+  "dow": "Thu",
+  "hhmm": "21:06",
+  "coll": "NVDA",
+  "debt_usdc": 5.57,
+  "user": "0x69efac17fb7ae0da656db4aeab130339cdfc05d0",
+  "tx": "0xd38201633226232195a95025060bf186a9b62c0261d71d87a918516007f413d4",
+  "block": 53612209
+ },
+ {
+  "t": "2026-11-05T23:19:43+00:00",
+  "dow": "Thu",
+  "hhmm": "23:19",
+  "coll": "MSFT",
+  "debt_usdc": 3.11,
+  "user": "0x80bc92a163c227b99883d285f9d1b42e98d12c1e",
+  "tx": "0x269e82f91c031a70885d2f7078f7d329a8e0c39ccb2690f160fad648eae740c1",
+  "block": 53652038
+ },
+ {
+  "t": "2026-11-09T05:07:28+00:00",
+  "dow": "Mon",
+  "hhmm": "05:07",
+  "coll": "NVDA",
+  "debt_usdc": 25.07,
+  "user": "0x97c2301be25bfe220b9bf77e82d2680d5a27d135",
+  "tx": "0x861d3e88a9b5e7aa9196c452f64a8aae13109348f9b8a51fcc75aefe7d8ef529",
+  "block": 55052366
+ },
+ {
+  "t": "2026-11-09T14:30:47+00:00",
+  "dow": "Mon",
+  "hhmm": "14:30",
+  "coll": "NVDA",
+  "debt_usdc": 7.69,
+  "user": "0x997effcf7f14038293fb95a32350cc60515543a7",
+  "tx": "0x582f22c83f10f7c1026aa761d079b9e82dbca0b2ba6a5df1db6daf58e9a43ed4",
+  "block": 55221360
+ },
+ {
+  "t": "2026-11-10T14:29:04+00:00",
+  "dow": "Tue",
+  "hhmm": "14:29",
+  "coll": "AMZN",
+  "debt_usdc": 0.46,
+  "user": "0x88e2756128fe265841885169b51e0da8aafac4c3",
+  "tx": "0xb988639b4c68de1deffd13afcad76b4fedbe097e0ae3a088184e63d967c03e78",
+  "block": 55652844
+ },
+ {
+  "t": "2026-11-10T15:45:23+00:00",
+  "dow": "Tue",
+  "hhmm": "15:45",
+  "coll": "NVDA",
+  "debt_usdc": 248.31,
+  "user": "0xba4e1ad59d45ec595280ca1a9a3c677f51983cbb",
+  "tx": "0x0cabf2ed2ebc979e4ef2c65c4f2fcf69084f2d541e398162982004304c3105cf",
+  "block": 55675737
+ },
+ {
+  "t": "2026-11-11T12:26:29+00:00",
+  "dow": "Wed",
+  "hhmm": "12:26",
+  "coll": "SPCX",
+  "debt_usdc": 7.04,
+  "user": "0x7e25ddff0aab6827b1bc958408ac07cb1d1182d4",
+  "tx": "0xe50de789e3993e2fd07ffb6c54c965d5cb6f18d3a36e32a62fa1e0c668ee73e5",
+  "block": 56048071
+ },
+ {
+  "t": "2026-11-11T22:28:56+00:00",
+  "dow": "Wed",
+  "hhmm": "22:28",
+  "coll": "NVDA",
+  "debt_usdc": 1.12,
+  "user": "0x1090c7d5ac0f3a6934ddbd5d30fb6c10f032a1f6",
+  "tx": "0x21fe073e09876cccd6b496e19685c13bc1f8170c67893d77e0a53d1450bea61f",
+  "block": 56228804
+ },
+ {
+  "t": "2026-11-11T22:28:56+00:00",
+  "dow": "Wed",
+  "hhmm": "22:28",
+  "coll": "NVDA",
+  "debt_usdc": 6.02,
+  "user": "0x75da6fa5f6da28424e4b0370cc9ecb8d012a086d",
+  "tx": "0x18cbeb7b9dfe569b8c2cd922595b71ee5904b7f386a7180293cc130bfabd09a7",
+  "block": 56228804
+ },
+ {
+  "t": "2026-11-11T22:29:25+00:00",
+  "dow": "Wed",
+  "hhmm": "22:29",
+  "coll": "NVDA",
+  "debt_usdc": 250.74,
+  "user": "0x21885e45d0773a2c48a8be32e6ca2cdb3e64cc26",
+  "tx": "0x1b891dbd21a2b2c768a940d162aa07ac9817a6ead714c32ccb988e759a732057",
+  "block": 56228950
+ },
+ {
+  "t": "2026-11-11T22:29:25+00:00",
+  "dow": "Wed",
+  "hhmm": "22:29",
+  "coll": "NVDA",
+  "debt_usdc": 283.8,
+  "user": "0xba4e1ad59d45ec595280ca1a9a3c677f51983cbb",
+  "tx": "0xac0dc4b8efcda276ebb7913b94700d03de6d23ba8441c3fa9154df69d9b540a2",
+  "block": 56228950
+ },
+ {
+  "t": "2026-11-12T14:13:58+00:00",
+  "dow": "Thu",
+  "hhmm": "14:13",
+  "coll": "NVDA",
+  "debt_usdc": 50.17,
+  "user": "0x3264473150ead02a604812c7b5b70fef4a9b4503",
+  "tx": "0x8331e5bc2602d6ac537387dd9732d04ae1b12a6dfac70c838cb0e834c576cc18",
+  "block": 56512315
+ },
+ {
+  "t": "2026-11-17T20:30:17+00:00",
+  "dow": "Tue",
+  "hhmm": "20:30",
+  "coll": "MSFT",
+  "debt_usdc": 0.01,
+  "user": "0x66e2912a563052a71f46d1fc56221b59c96a8bcd",
+  "tx": "0x391e8bf5424c7d880498710df8a3237fc9306a7d649361f77611b84a5ded172f",
+  "block": 58785209
+ },
+ {
+  "t": "2026-11-18T12:12:51+00:00",
+  "dow": "Wed",
+  "hhmm": "12:12",
+  "coll": "NVDA",
+  "debt_usdc": 912.01,
+  "user": "0x3b7f99993a834863afbc622b67fe68e94782ed79",
+  "tx": "0x9daa86e1a1607181fec96ecc59179c676a8035ab96ba8d1dff53cf7257f1cb7f",
+  "block": 59067978
+ }
+]
