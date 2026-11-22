@@ -81,6 +81,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
       <div><b id="need">–</b><span>USDC to repay now to stay at 1.05 or above</span></div>
       <div><b id="hfAfter">–</b><span>Health factor after the gap, if you repay</span></div>
     </div>
+    <p class="small warn" id="fixWarn" hidden></p>
     <div class="row" style="margin-top:12px">
       <button id="repay" disabled>Connect the borrower's wallet to repay</button>
       <span class="small dim" id="sigs">The USDC goes from your wallet straight to Aave.</span>
@@ -144,11 +145,19 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   class RpcError extends Error {}
   // an error whose message is our own HTML (a basescan link built from a checked hash)
   const htmlError = (m) => { const e = new Error(m); e.html = true; return e; };
+  // one JSON-RPC call: 15 s timeout, up to 3 tries with a pause when the public node is busy
   async function rpc(method, params) {
     let r;
-    try { r = await fetch(RPC, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }); }
-    catch (e) { throw new RpcError("The Base node did not answer."); }
-    if (!r.ok) throw new RpcError(r.status === 429 ? "The Base node is busy. Try again in a moment." : "The Base node answered " + r.status + ".");
+    for (let t = 0; ; t++) {
+      const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 15000);
+      try { r = await fetch(RPC, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }), signal: ac.signal }); }
+      catch (e) { r = null; }
+      finally { clearTimeout(timer); }
+      if (r && r.ok) break;
+      if (t < 2 && (!r || r.status === 429 || r.status >= 500)) { await new Promise((res) => setTimeout(res, 1500 * (t + 1))); continue; }
+      if (!r) throw new RpcError("The Base node did not answer.");
+      throw new RpcError(r.status === 429 ? "The Base node is busy. Try again in a moment." : "The Base node answered " + r.status + ".");
+    }
     const j = await r.json();
     if (j.error) {
       const m = j.error.message || "The node refused that call.";
@@ -191,6 +200,9 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
       if (isBorrow) it.debtAssets = big((await callW(SPOKE, SEL.debt + word(r) + addr(user), block))[0]);
       items.push(it);
     }
+    // the repay goes to reserve 7: it must be Base USDC, and USDC must be the only debt
+    if (asAddr((await callW(SPOKE, SEL.reserve + word(USDC_RESERVE), block))[0]).toLowerCase() !== USDC) throw new Error("Aave's reserve 7 is no longer Base USDC. The page stops here.");
+    if (items.some((i) => i.isBorrow && i.id !== USDC_RESERVE)) throw new Error("This position owes something other than USDC. The page only handles USDC debt.");
     const ts = Number(BigInt((await rpc("eth_getBlockByNumber", [block, false])).timestamp));
     const usdc = items.find((i) => i.id === USDC_RESERVE) || { id: USDC_RESERVE, dec: 6, debtAssets: 0n };
     return { user: user.toLowerCase(), block, ts, hf, debtRay, items, usdcPrice, usdcDec: usdc.dec || 6, usdcDebt: usdc.debtAssets || 0n };
@@ -321,10 +333,17 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     el("hfGap").textContent = hfText(hfG); el("hfGap").className = cls(hfG);
     st.need = needUsdc(d, wGap);
     st.needGap = el("gap").value;
-    el("need").textContent = st.need === 0n ? "nothing" : usdc6(st.need);
+    el("need").textContent = st.need === 0n ? "nothing" : usdc6(st.need, st.need < 10000n); // under a cent: show it in full, not "0.00"
     const hfA = st.need === 0n ? hfG : hfAfterRepay(d, wGap, st.need);
     el("hfAfter").textContent = (st.need === 0n ? "" : "≈ ") + hfText(hfA);
     el("hfAfter").className = cls(hfA);
+    // say it next to the amount when part of the collateral is stressed with Aave's own (possibly stale) price only
+    const weak = d.items.filter((it) => it.isColl && it.cf > 0n && !stressPrice(it).used).map((it) => {
+      const below = it.pool && !it.pool.why && it.pool.price8 < it.price ? Number((it.price - it.pool.price8) * 10000n / it.price) / 100 : null;
+      return esc(it.sym) + (below != null ? " (its Base pool is " + below.toFixed(1) + "% below Aave)" : " (" + esc(stressPrice(it).why) + ")");
+    });
+    el("fixWarn").hidden = !weak.length;
+    el("fixWarn").innerHTML = weak.length ? "Careful: " + weak.join(", ") + " is counted at Aave's price only. If it opens lower than that, this amount is not enough: pick a bigger gap." : "";
     renderRepayButton();
   }
 
@@ -337,21 +356,36 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     if (!st.account) { b.disabled = false; b.textContent = "Connect the borrower's wallet to repay"; return; }
     if (st.account.toLowerCase() !== d.user) { b.disabled = true; b.textContent = "Connected wallet is not this borrower"; return; }
     b.disabled = st.need === 0n;
-    b.textContent = st.need > 0n ? "Repay " + usdc6(st.need) + " USDC" : "Nothing to repay for this gap";
+    b.textContent = st.need > 0n ? "Repay " + usdc6(st.need, st.need < 10000n) + " USDC" : "Nothing to repay for this gap";
   }
 
   function status(id, html, bad, good) { const s = el(id); s.className = "status" + (bad ? " bad" : "") + (good ? " good" : ""); s.innerHTML = html; }
 
+  // A sent transaction without a receipt blocks a second repay, also across Check and page reloads.
+  const PKEY = "shield-pending";
+  function savePending(hash) { st.pending = hash; st.pendingAt = Date.now(); try { localStorage.setItem(PKEY, hash + "|" + st.pendingAt); } catch (e) {} }
+  function clearPending() { st.pending = null; try { localStorage.removeItem(PKEY); } catch (e) {} }
+  try { const [h0, t0] = (localStorage.getItem(PKEY) || "").split("|"); if (isHash(h0 || "")) { st.pending = h0; st.pendingAt = Number(t0) || 0; } } catch (e) {}
+  // true when the pending transaction is now final (or there is none). One the node has never
+  // heard of after 15 minutes was dropped by the wallet and no longer blocks.
+  async function settlePending() {
+    if (!st.pending) return true;
+    const r = await rpc("eth_getTransactionReceipt", [st.pending]);
+    if (r && r.blockNumber) { clearPending(); return true; }
+    if (Date.now() - st.pendingAt > 15 * 60000 && !(await rpc("eth_getTransactionByHash", [st.pending]))) { clearPending(); return true; }
+    return false;
+  }
+
   async function check() {
     const a = el("addr").value.trim();
     st.epoch++; // any operation started for an earlier snapshot is now stale
-    st.pending = null;
     if (!isAddr(a)) { st.data = null; el("view").hidden = true; el("fix").hidden = true; status("st-read", "Paste a full 0x address.", true); return; }
     if (st.busy) return;
     st.busy = true; el("check").disabled = true;
     status("st-read", "Reading the position on Base…");
     try {
       if ((await rpc("eth_chainId", [])) !== CHAIN) throw new Error("The node is not on Base.");
+      if (!(await settlePending())) status("st-repay", 'An earlier transaction is still waiting: <a href="https://basescan.org/tx/' + st.pending + '">' + st.pending.slice(0, 10) + "…</a>. Repay unlocks once it is final; press Check again.", true);
       const d = await readPosition(a);
       if (el("addr").value.trim().toLowerCase() !== d.user) return; // the field changed while reading
       st.data = d;
@@ -372,7 +406,12 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     if (!p) throw new Error("No wallet in this browser. Open the page in Coinbase Wallet or Rabby.");
     st.account = (await p.request({ method: "eth_requestAccounts" }))[0];
     if ((await walletChain(p)) !== CHAIN) {
-      try { await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN }] }); } catch (e) {}
+      try { await p.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN }] }); }
+      catch (e) { // 4902: the wallet does not know Base yet
+        if (e && (e.code === 4902 || (e.data && e.data.originalError && e.data.originalError.code === 4902))) {
+          try { await p.request({ method: "wallet_addEthereumChain", params: [{ chainId: CHAIN, chainName: "Base", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 }, rpcUrls: ["https://mainnet.base.org"], blockExplorerUrls: ["https://basescan.org"] }] }); } catch (e2) {}
+        }
+      }
       if ((await walletChain(p)) !== CHAIN) throw new Error("Switch the wallet to Base first.");
     }
     el("connect").textContent = st.account.slice(0, 6) + "…" + st.account.slice(-4);
@@ -396,17 +435,18 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     const hash = await provider().request({ method: "eth_sendTransaction", params: [{ from: op.from, to, data }] });
     if (!isHash(hash)) throw new Error("The wallet returned no transaction hash.");
     op.hashes.push(hash);
+    savePending(hash);
     const link = '<a href="https://basescan.org/tx/' + hash + '">' + hash.slice(0, 10) + "…</a>";
     for (let i = 0; i < 120; i++) {
       let r = null;
       try { r = await rpc("eth_getTransactionReceipt", [hash]); } catch (e) { if (!(e instanceof RpcError)) throw e; }
       if (r && r.blockNumber) {
+        clearPending();
         if (r.status !== "0x1") throw htmlError("The " + what + " failed onchain: " + link);
         return { hash, link };
       }
       await new Promise((res) => setTimeout(res, 2000));
     }
-    st.pending = hash;
     throw htmlError("No receipt yet for the " + what + ". It may still go through: " + link + ". Press Check once it is final.");
   }
 
@@ -415,65 +455,74 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     if (!d0 || !st.account) throw new Error("Connect the borrower's own wallet.");
     const op = { from: st.account.toLowerCase(), user: d0.user, epoch: st.epoch, hashes: [] };
     if (op.from !== op.user) throw new Error("Connect the borrower's own wallet.");
+    if (!(await settlePending())) throw new Error("An earlier transaction is still waiting. Press Check once it is final.");
     const gap = el("gap").value;
     const usdc = USDC;
-    // fresh numbers: debt grows every second
+    // fresh numbers: debt grows every second; the amount always comes from this read and the pinned gap
     const fresh = async () => {
       const d = await readPosition(op.user);
       st.data = d; render();
       if (el("gap").value !== gap) throw new Error("The gap changed. Check the new amount and press Repay again.");
       return d;
     };
-    let d = await fresh();
-    const hfBefore = d.hf;
-    let amt = st.need;
-    if (amt === 0n) throw new Error("Nothing to repay for this gap.");
+    const needOf = (d) => (d.debtRay === 0n ? 0n : needUsdc(d, weightedBps(d, (it) => stressPrice(it).p, BigInt(gap))));
+    const partialText = (d, bal, amt) => " This is a partial repay: you hold " + usdc6(bal) + " USDC. After the gap the health factor would be about " +
+      hfText(hfAfterRepay(d, weightedBps(d, (it) => stressPrice(it).p, BigInt(gap)), amt)) + ", not 1.05.";
     const balance = async () => big((await callW(usdc, SEL.balanceOf + addr(op.from), "latest"))[0]);
     const allowance = async () => big((await callW(usdc, SEL.allowance + addr(op.from) + addr(SPOKE), "latest"))[0]);
+    const leftover = async () => { try { const a = await allowance(); return a > 0n ? " Aave may still take up to " + usdc6(a, true) + " USDC from this wallet if you repay later; you can set it to 0 in your wallet." : ""; } catch (e) { return ""; } };
+
+    let d = await fresh();
+    const hfBefore = d.hf;
+    let need = needOf(d);
+    if (need === 0n) throw new Error("Nothing to repay for this gap.");
     let bal = await balance();
     if (bal === 0n) throw new Error("This wallet has no USDC on Base.");
-    let partial = "";
-    if (bal < amt) {
-      amt = bal;
-      const wGap = weightedBps(d, (it) => stressPrice(it).p, BigInt(gap));
-      partial = " This is a partial repay: you hold " + usdc6(bal) + " USDC. After the gap the health factor would be about " + hfText(hfAfterRepay(d, wGap, amt)) + ", not 1.05.";
-    }
-    if ((await allowance()) < amt) {
+    let amt = need < bal ? need : bal;
+    let partial = bal < need ? partialText(d, bal, amt) : "";
+    let allowed = await allowance();
+    if (allowed < amt) {
       // interest accrues every block: allow 0.5% (at least 1 cent) more than today's amount, within the balance
       let cap = amt + (amt / 200n > 10000n ? amt / 200n : 10000n);
       if (cap > bal) cap = bal;
       status("st-repay", "Signature 1 of 2: allow Aave to take up to " + usdc6(cap, true) + " USDC (today's amount plus 0.5% for interest that accrues while you sign)." + partial);
       await sendTx(op, usdc, SEL.approve + addr(SPOKE) + word(cap), "approval");
+      op.approved = true;
       // the wallet may have stayed open a while: read again before the repay
-      d = await fresh();
-      const again = st.need;
-      bal = await balance();
-      const allowed = await allowance();
-      if (again === 0n) throw new Error("Prices moved while the wallet was open: no repay is needed for this gap any more. Nothing was repaid. Aave may still take up to " + usdc6(allowed, true) + " USDC from this wallet if you repay later; you can set it to 0 in your wallet.");
-      const want = again < bal ? again : bal;
-      if (want > allowed) throw new Error("While the wallet was open the amount grew to " + usdc6(want, true) + " USDC; " + usdc6(allowed, true) + " is allowed. Press Repay again to allow the new amount. Nothing was repaid.");
-      amt = want;
-      partial = "";
-      if (bal < again) {
-        const wGap2 = weightedBps(d, (it) => stressPrice(it).p, BigInt(gap));
-        partial = " This is a partial repay: you hold " + usdc6(bal) + " USDC. After the gap the health factor would be about " + hfText(hfAfterRepay(d, wGap2, amt)) + ", not 1.05.";
-      }
-      op.approved = allowed;
+      try {
+        d = await fresh();
+        need = needOf(d);
+        bal = await balance();
+        allowed = await allowance();
+      } catch (e) { e.note = " Nothing was repaid." + (await leftover()); throw e; }
+      if (need === 0n) throw new Error((d.debtRay === 0n ? "The debt is already paid." : "Prices moved while the wallet was open: no repay is needed for this gap any more.") + " Nothing was repaid." + (await leftover()));
+      if (bal === 0n) throw new Error("This wallet has no USDC on Base any more. Nothing was repaid." + (await leftover()));
+      amt = need < bal ? need : bal;
+      if (amt > allowed) throw new Error("While the wallet was open the amount grew to " + usdc6(amt, true) + " USDC; " + usdc6(allowed, true) + " is allowed. Press Repay again to allow the new amount. Nothing was repaid.");
+      partial = bal < need ? partialText(d, bal, amt) : "";
     }
-    status("st-repay", "Signature " + (op.hashes.length ? "2 of 2" : "1 of 1") + ": repay " + usdc6(amt, true) + " USDC to Aave." + partial);
+    // paying off the whole debt: send everything allowed (within the balance). The Spoke takes only
+    // the debt at that block, so interest that grew while signing leaves no dust behind.
+    const full = need >= d.usdcDebt && amt === need;
+    const send = full ? (allowed < bal ? allowed : bal) : amt;
+    status("st-repay", "Signature " + (op.hashes.length ? "2 of 2" : "1 of 1") + ": repay " + (full ? "the whole debt, about " : "") + usdc6(amt, true) + " USDC to Aave." + partial);
+    const balBefore = bal;
     let link;
-    try { ({ link } = await sendTx(op, SPOKE, SEL.repay + word(USDC_RESERVE) + word(amt) + addr(op.user), "repay")); }
+    try { ({ link } = await sendTx(op, SPOKE, SEL.repay + word(USDC_RESERVE) + word(send) + addr(op.user), "repay")); }
     catch (e) {
-      if (op.approved != null && !e.html) e.note = " Nothing was repaid. Aave may still take up to " + usdc6(op.approved, true) + " USDC from this wallet if you repay later; you can set it to 0 in your wallet.";
+      if (op.approved && !e.html) e.note = " Nothing was repaid." + (await leftover());
       throw e;
     }
-    status("st-repay", "Repaid " + usdc6(amt, true) + " USDC: " + link + ". Reading the new health factor…", false, true);
+    let paid = amt;
+    try { const b2 = await balance(); if (b2 <= balBefore) paid = balBefore - b2; } catch (e) {}
+    const left = await leftover();
+    status("st-repay", "Repaid " + usdc6(paid, true) + " USDC: " + link + ". Reading the new health factor…" + left, false, true);
     try {
       const after = await readPosition(op.user);
       st.data = after; render();
-      status("st-repay", "Repaid " + usdc6(amt, true) + " USDC: " + link + ". Health factor " + hfText(hfBefore) + " → " + hfText(after.debtRay === 0n ? null : after.hf) + ".", false, true);
+      status("st-repay", "Repaid " + usdc6(paid, true) + " USDC: " + link + ". Health factor " + hfText(hfBefore) + " → " + hfText(after.debtRay === 0n ? null : after.hf) + "." + left, false, true);
     } catch (e) {
-      status("st-repay", "Repaid " + usdc6(amt, true) + " USDC: " + link + ". The new health factor could not be read yet; press Check.", false, true);
+      status("st-repay", "Repaid " + usdc6(paid, true) + " USDC: " + link + ". The new health factor could not be read yet; press Check." + left, false, true);
     }
   }
 
