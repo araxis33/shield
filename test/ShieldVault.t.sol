@@ -2,7 +2,7 @@
 pragma solidity ^0.8.29;
 
 import {Test, console2} from "forge-std/Test.sol";
-import {ShieldVault, ISpoke, IGiver, IERC20, ISugarHelper, IAaveOracle} from "../src/ShieldVault.sol";
+import {ShieldVault, ISpoke, IGiver, IERC20, ISugarHelper, IAaveOracle, ICLFactory} from "../src/ShieldVault.sol";
 
 interface ISpokeW {
     function setUserPositionManager(address positionManager, bool approve) external;
@@ -17,6 +17,9 @@ contract ShieldVaultTest is Test {
     IERC20 constant USDC = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
     ISugarHelper constant SUGAR = ISugarHelper(0x0AD09A66af0154a84e86F761313d02d0abB6edd5);
     address constant PROXY = 0xCc780DdE33f56f55dE778D42c930959374a4a068;
+    ICLFactory constant FACTORY = ICLFactory(0x9CB220581b91b0C83223012FE69688b92aD07a76);
+    uint256 constant FORK_BLOCK = 61249290; // Mon 23 Nov 2026, borrower 0x01db…a362 HF 1.4548
+    bytes4 constant HF_NOT_BELOW = bytes4(keccak256("HealthFactorNotBelowThreshold()"));
     uint256 constant USDC_RESERVE = 7;
 
     address[8] POOLS = [
@@ -39,7 +42,7 @@ contract ShieldVaultTest is Test {
     address[] pools;
 
     function setUp() public {
-        vm.createSelectFork(vm.envOr("BASE_RPC", string("https://mainnet.base.org")));
+        vm.createSelectFork(vm.envOr("BASE_RPC", string("https://mainnet.base.org")), vm.envOr("FORK_BLOCK", FORK_BLOCK));
         user = vm.envOr("BORROWER", address(0x01DBDB9748ECf71B1fFbb62f5cB41318531bA362));
         rvm = makeAddr("reactiveVM");
         oracle = IAaveOracle(SPOKE.ORACLE());
@@ -58,7 +61,8 @@ contract ShieldVaultTest is Test {
             }
         }
         coll = largestCollateral();
-        vault = new ShieldVault(SPOKE, GIVER, USDC, SUGAR, PROXY, rvm, user, coll, reserves, pools);
+        assertEq(pools.length, 8, "all eight stock pools matched to reserves");
+        vault = new ShieldVault(SPOKE, GIVER, USDC, SUGAR, FACTORY, PROXY, rvm, user, coll, 1e12, reserves, pools);
         setOpen();
     }
 
@@ -117,6 +121,18 @@ contract ShieldVaultTest is Test {
         assertEq(vault.marketState(), 1, "closed");
     }
 
+    /// Monday 01:00 UTC after the current weekend: every feed prints `bps` lower and is fresh again.
+    function mondayPrint(uint256 bps) internal {
+        uint256 t = vm.getBlockTimestamp();
+        uint256 day = (t / 1 days + 4) % 7;
+        uint256 toMon = (1 + 7 - day) % 7;
+        uint256 mon = (t / 1 days + toMon) * 1 days + 1 hours;
+        vm.warp(mon);
+        gapAave(bps);
+        setOpenAt(mon);
+        assertEq(vault.marketState(), 0, "open again");
+    }
+
     /// Every stock feed prints `bps` lower (the reopen print after a bad weekend).
     function gapAave(uint256 bps) internal {
         uint256 n = SPOKE.getReserveCount();
@@ -163,6 +179,10 @@ contract ShieldVaultTest is Test {
     }
 
     function liquidate(uint256 c) internal returns (bool ok) {
+        (ok,) = liquidateWhy(c);
+    }
+
+    function liquidateWhy(uint256 c) internal returns (bool ok, bytes4 why) {
         // Coinbase stock tokens are chain built-ins (code 0xef); a fork cannot run them, so only their transfer is simulated.
         uint256 n = SPOKE.getReserveCount();
         for (uint256 r; r < n; ++r) {
@@ -173,9 +193,11 @@ contract ShieldVaultTest is Test {
         deal(address(USDC), liq, 10_000_000e6);
         vm.startPrank(liq);
         USDC.approve(address(SPOKE), type(uint256).max);
-        (ok,) = address(SPOKE).call(
+        bytes memory ret;
+        (ok, ret) = address(SPOKE).call(
             abi.encodeCall(ISpokeW.liquidationCall, (c, USDC_RESERVE, user, type(uint256).max, false))
         );
+        if (!ok && ret.length >= 4) why = bytes4(ret);
         vm.stopPrank();
     }
 
@@ -225,18 +247,18 @@ contract ShieldVaultTest is Test {
         activate(h + 0.3e18, h + 0.5e18, 100e6, 0, 150e6);
         uint256 t = vm.getBlockTimestamp(); // own clock: block.timestamp can read stale after vm.warp under via-ir
         assertEq(vault.protect(), 100e6, "capped by maxRepay");
-        vm.expectRevert(ShieldVault.Cooldown.selector);
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.Cooldown));
         vault.protect();
         vm.warp(t + 15 minutes - 1);
         setOpenAt(t + 15 minutes - 1);
-        vm.expectRevert(ShieldVault.Cooldown.selector);
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.Cooldown));
         vault.protect();
         vm.warp(t + 15 minutes);
         setOpenAt(t + 15 minutes);
         assertEq(vault.protect(), 50e6, "capped by the rest of the budget");
         vm.warp(t + 30 minutes);
         setOpenAt(t + 30 minutes);
-        vm.expectRevert(ShieldVault.NothingToRepay.selector);
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.NothingToRepay));
         vault.protect();
         assertEq(vault.reserve(), 850e6);
     }
@@ -248,7 +270,7 @@ contract ShieldVaultTest is Test {
         fund(1_000e6, true);
         activate(1.0001e18 > h - 0.05e18 ? 1.0001e18 : h - 0.05e18, h + 0.1e18, 100e6, 0, 1_000e6);
         uint256 d0 = debt();
-        vm.expectRevert(ShieldVault.Healthy.selector);
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.Healthy));
         vault.protect();
         assertEq(vault.reserve(), 1_000e6);
         assertEq(debt(), d0);
@@ -266,7 +288,7 @@ contract ShieldVaultTest is Test {
         uint256 before = SPOKE.getUserSuppliedAssets(coll, user);
         goWeekend();
         gapPools(g); // the pools see it on Saturday ...
-        gapAave(g); // ... Aave only at the Monday print
+        mondayPrint(g); // ... Aave only at the Monday print
         assertLt(hf(), 1e18);
         assertTrue(liquidate(coll), "liquidated");
         assertLt(SPOKE.getUserSuppliedAssets(coll, user), before, "collateral taken");
@@ -285,10 +307,13 @@ contract ShieldVaultTest is Test {
         assertGe(s.aaveOnlyHF, h - 1e15, "Aave still asleep at Friday's price");
         uint256 spent = vault.protect();
         console2.log("Saturday repay USDC", spent);
-        gapAave(g); // Monday print
+        mondayPrint(g);
         console2.log("HF after the print x1e4", hf() / 1e14);
-        assertGe(hf(), 1.05e18, "alive after the print");
-        assertFalse(liquidate(coll), "liquidation must fail");
+        // target 1.05 was set on Saturday; ~1.5 days of interest until the print shave a little off it
+        assertGt(hf(), 1.04e18, "alive after the print, close to target");
+        (bool ok, bytes4 why) = liquidateWhy(coll);
+        assertFalse(ok, "liquidation must fail");
+        assertEq(why, HF_NOT_BELOW, "Aave refuses: health factor not below threshold");
     }
 
     function test_weekendLateRepayIsTooLate() public {
@@ -297,9 +322,13 @@ contract ShieldVaultTest is Test {
         fund(200_000e6, true);
         activate(1.05e18, 1.0501e18, 200_000e6, 200_000e6, 200_000e6);
         goWeekend();
-        gapAave(g); // the print lands before anyone acted
+        mondayPrint(g); // the print lands before the vault acted (no pool signal reached it)
         assertTrue(liquidate(coll), "liquidator first");
-        assertLt(SPOKE.getUserSuppliedAssets(coll, user), before);
+        uint256 left = SPOKE.getUserSuppliedAssets(coll, user);
+        assertLt(left, before, "collateral taken");
+        (bool acted,) = address(vault).call(abi.encodeCall(vault.protect, ())); // the vault wakes up after the print
+        console2.log("vault acted after the liquidation", acted);
+        assertEq(SPOKE.getUserSuppliedAssets(coll, user), left, "collateral does not come back");
     }
 
     // ---------------------------------------------------------------- 5. exit always works, stop means stop
@@ -318,7 +347,7 @@ contract ShieldVaultTest is Test {
         vm.clearMockedCalls();
         setOpen();
         fund(100e6, false); // top-up after stop does not switch it back on
-        vm.expectRevert(ShieldVault.Inactive.selector);
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.Inactive));
         vault.protect();
     }
 
@@ -326,10 +355,14 @@ contract ShieldVaultTest is Test {
 
     function test_giverNotApprovedNothingLost() public {
         uint256 h = hf();
+        vm.prank(user);
+        ISpokeW(address(SPOKE)).setUserPositionManager(address(GIVER), false);
         fund(1_000e6, false);
         activate(h + 0.1e18, h + 0.2e18, 1_000e6, 0, 1_000e6);
-        vm.expectRevert();
+        assertEq(uint8(vault.stress().status), uint8(ShieldVault.Status.Repaid), "would act");
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.GiverFailed));
         vault.protect();
+        assertEq(USDC.allowance(address(vault), address(GIVER)), 0, "no allowance left");
         assertEq(vault.reserve(), 1_000e6);
         assertEq(vault.lastProtect(), 0);
         // the Reactive path swallows it and only logs
@@ -356,8 +389,7 @@ contract ShieldVaultTest is Test {
         vm.prank(PROXY);
         vm.expectRevert();
         vault.protectByReactive(makeAddr("someoneElse")); // proxy, wrong Reactive contract
-        vm.expectRevert(ShieldVault.NotUser.selector);
-        vault.protectSelf();
+
     }
 
     function test_strangersCannotTouchMoney() public {
@@ -381,5 +413,98 @@ contract ShieldVaultTest is Test {
         assertFalse(vault.inWeekendWindow(1795204799)); // Fri 19:59:59
         assertTrue(vault.inWeekendWindow(1795397399)); // Mon 01:29:59
         assertFalse(vault.inWeekendWindow(1795397400)); // Mon 01:30
+    }
+
+    // ---------------------------------------------------------------- 8. edges Codex asked for
+
+    function test_brokenFeedIsFaultNotWeekend() public {
+        uint256 h = hf();
+        fund(1_000e6, true);
+        activate(h + 0.1e18, h + 0.2e18, 1_000e6, 1_000e6, 1_000e6);
+        goWeekend();
+        address src = oracle.getReserveSource(coll);
+        vm.mockCall(src, abi.encodeWithSignature("latestRoundData()"), abi.encode(uint80(1), int256(1), uint256(0), uint256(0), uint80(1)));
+        assertEq(vault.marketState(), 2, "updatedAt 0 = fault");
+        vm.mockCall(src, abi.encodeWithSignature("latestRoundData()"), abi.encode(uint80(1), int256(1), vm.getBlockTimestamp() + 1, vm.getBlockTimestamp() + 1, uint80(1)));
+        assertEq(vault.marketState(), 2, "future time = fault");
+        vm.mockCall(src, abi.encodeWithSignature("latestRoundData()"), abi.encode(uint80(1), int256(0), vm.getBlockTimestamp(), vm.getBlockTimestamp(), uint80(1)));
+        assertEq(vault.marketState(), 2, "zero price = fault");
+        vm.mockCallRevert(src, abi.encodeWithSignature("latestRoundData()"), "down");
+        assertEq(vault.marketState(), 2, "unreadable = fault");
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.DataFault));
+        vault.protect();
+        assertEq(vault.reserve(), 1_000e6);
+    }
+
+    function test_staleInSessionIsFault() public {
+        uint256 t = vm.getBlockTimestamp(); // fork block is a Monday afternoon, in session
+        assertFalse(vault.inWeekendWindow(t));
+        setOpenAt(t - 3 hours);
+        assertEq(vault.marketState(), 2);
+    }
+
+    function test_noDebtIsHealthyEvenWithBrokenFeed() public {
+        vm.mockCall(address(SPOKE), abi.encodeWithSignature("getUserTotalDebt(uint256,address)", USDC_RESERVE, user), abi.encode(uint256(0)));
+        vm.mockCallRevert(oracle.getReserveSource(coll), abi.encodeWithSignature("latestRoundData()"), "down");
+        assertEq(uint8(vault.stress().status), uint8(ShieldVault.Status.Healthy));
+    }
+
+    function test_usdcCollateralOrOtherDebtIsUnsupported() public {
+        uint256 h = hf();
+        fund(1_000e6, true);
+        activate(h + 0.1e18, h + 0.2e18, 1_000e6, 0, 1_000e6);
+        vm.mockCall(address(SPOKE), abi.encodeWithSignature("getUserReserveStatus(uint256,address)", USDC_RESERVE, user), abi.encode(true, true));
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.Unsupported));
+        vault.protect();
+        vm.clearMockedCalls();
+        setOpen();
+        vm.mockCall(address(SPOKE), abi.encodeWithSignature("getUserReserveStatus(uint256,address)", coll, user), abi.encode(true, true));
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.Unsupported));
+        vault.protect();
+    }
+
+    function test_triggerEqualsStressIsHealthy() public {
+        uint256 h = vault.stress().stressHF;
+        fund(1_000e6, true);
+        activate(h, h + 0.1e18, 1_000e6, 0, 1_000e6);
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.Healthy));
+        vault.protect();
+    }
+
+    function test_poolOnlySignalCappedByMaxAeroRepay() public {
+        uint256 g = _killingGap();
+        fund(200_000e6, true);
+        activate(1.05e18, 1.0501e18, 200_000e6, 500e6, 200_000e6);
+        goWeekend();
+        gapPools(g);
+        assertEq(vault.protect(), 500e6, "pool-only signal: at most maxAeroRepay");
+    }
+
+    function test_thinPoolFallsBackToAave() public {
+        goWeekend();
+        for (uint256 i; i < pools.length; ++i) {
+            vm.mockCall(pools[i], abi.encodeWithSignature("liquidity()"), abi.encode(uint128(1)));
+        }
+        ShieldVault.Stress memory s = vault.stress();
+        assertEq(s.stressHF, s.aaveOnlyHF, "thin pools ignored");
+    }
+
+    function test_reactivateKeepsCooldown() public {
+        uint256 h = hf();
+        fund(1_000e6, true);
+        activate(h + 0.3e18, h + 0.5e18, 100e6, 0, 1_000e6);
+        vault.protect();
+        activate(h + 0.3e18, h + 0.5e18, 100e6, 0, 1_000e6);
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.NotProtected.selector, ShieldVault.Status.Cooldown));
+        vault.protect();
+    }
+
+    function test_badPoolRejectedAtDeploy() public {
+        address[] memory p = new address[](1);
+        uint256[] memory r = new uint256[](1);
+        r[0] = reserves[0];
+        p[0] = pools[1]; // another stock's pool
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.BadPool.selector, r[0]));
+        new ShieldVault(SPOKE, GIVER, USDC, SUGAR, FACTORY, PROXY, rvm, user, coll, 1e12, r, p);
     }
 }

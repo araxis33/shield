@@ -70,6 +70,13 @@ interface ICLPool {
     function token0() external view returns (address);
     function token1() external view returns (address);
     function observe(uint32[] calldata secondsAgos) external view returns (int56[] memory, uint160[] memory);
+    function factory() external view returns (address);
+    function tickSpacing() external view returns (int24);
+    function liquidity() external view returns (uint128);
+}
+
+interface ICLFactory {
+    function getPool(address tokenA, address tokenB, int24 tickSpacing) external view returns (address);
 }
 
 interface ISugarHelper {
@@ -81,16 +88,17 @@ interface IERC20 {
     function transfer(address, uint256) external returns (bool);
     function transferFrom(address, address, uint256) external returns (bool);
     function approve(address, uint256) external returns (bool);
-    function decimals() external view returns (uint8);
+    function allowance(address, address) external view returns (uint256);
 }
 
 /// @title Shield — one-seat automaton that repays an Aave V4 stock-loan before a weekend gap reaches the oracle.
-/// @notice The borrower keeps a USDC reserve here. When the position's health under stress (each stock priced at the
-///         lower of Aave's price and the 60-min TWAP of its Aero pool on Base, with an optional extra haircut while
-///         the market is closed) falls under the borrower's trigger, the vault repays part of the USDC debt through
+/// @notice The borrower keeps a USDC reserve here. When the position's health under stress (while the stock market is
+///         closed: each stock at the lower of Aave's price and the 60-min TWAP of its Aero pool on Base, with an
+///         optional extra haircut) falls under the borrower's trigger, the vault repays part of the USDC debt through
 ///         Aave's GiverPositionManager, back up to the borrower's target. Reactive Network wakes it on a timer;
 ///         anyone may also call `protect()`, which only ever spends the borrower's reserve on the borrower's own debt.
 ///         Money can only move vault -> Giver -> this borrower's debt, or vault -> borrower. No admin, no sweep.
+///         Top up only through `deposit`: USDC sent straight to the vault is not credited.
 contract ShieldVault is AbstractCallback {
     using MulDiv for uint256;
 
@@ -103,12 +111,24 @@ contract ShieldVault is AbstractCallback {
         uint128 maxAeroRepay; // USDC units per repay when only the pool price calls for it
     }
 
+    enum Status {
+        Repaid,
+        Inactive,
+        DataFault,
+        Unsupported, // debt outside USDC, or USDC enabled as collateral
+        Healthy,
+        Cooldown,
+        NothingToRepay,
+        GiverFailed
+    }
+
     struct Stress {
+        Status status; // Repaid here means "would act"
+        uint8 market; // 0 open, 1 closed, 2 data fault
         uint256 debt; // USDC units, drawn + premium
         uint256 stressHF; // WAD
         uint256 aaveOnlyHF; // WAD, same but without the pool prices
-        uint256 repay; // USDC units needed to reach target (before caps)
-        uint8 market; // 0 open, 1 closed, 2 data fault
+        uint256 repay; // USDC units that bring stress HF to target (before caps); rounded up by at most 1 unit
     }
 
     uint256 public constant USDC_RESERVE = 7;
@@ -116,6 +136,9 @@ contract ShieldVault is AbstractCallback {
     uint256 public constant MIN_REPAY = 1e6; // $1
     uint32 public constant MIN_COOLDOWN = 15 minutes;
     uint256 public constant STALE_AFTER = 2 hours;
+    uint256 internal constant FEED_GAS = 100_000;
+    uint256 internal constant POOL_GAS = 250_000;
+    uint256 internal constant HF_GAS = 400_000;
 
     ISpoke public immutable SPOKE;
     IAaveOracle public immutable ORACLE;
@@ -124,6 +147,7 @@ contract ShieldVault is AbstractCallback {
     ISugarHelper public immutable SUGAR;
     address public immutable USER; // the one seat
     uint256 public immutable FEED_RESERVE; // stock whose feed tells open / closed / fault
+    uint128 public immutable MIN_POOL_LIQUIDITY; // in-range liquidity below this: pool ignored, Aave price only
 
     mapping(uint256 reserveId => address pool) public poolOf;
     mapping(address pool => bool usdcIsToken0) internal usdc0;
@@ -140,17 +164,12 @@ contract ShieldVault is AbstractCallback {
     event Withdrawn(uint256 amount);
     event Activated(Rule rule, uint256 budget);
     event Stopped();
-    event Protected(uint256 spent, uint256 stressHFBefore, uint256 nativeHFAfter, bool aeroDriven);
-    event Skipped(bytes4 reason);
+    event Protected(address indexed user, uint256 spent, uint256 stressHFBefore, uint256 nativeHFAfter, bool aeroDriven);
+    event Skipped(Status status);
 
     error NotUser();
     error BadRule();
-    error Inactive();
-    error Healthy();
-    error Cooldown();
-    error DataFault();
-    error NothingToRepay();
-    error OtherDebt();
+    error NotProtected(Status status);
     error GiverMismatch(uint256 spent, uint256 repaid);
     error TransferFailedUSDC();
     error Reentrancy();
@@ -169,16 +188,19 @@ contract ShieldVault is AbstractCallback {
         locked = 1;
     }
 
+    /// @param factory_ Aero Slipstream factory; every pool must be its pool for (USDC, stock, tickSpacing).
     /// @param pools_ Aero USDC pool of each stock reserve in `reserves_`; zero = no pool, Aave price only.
     constructor(
         ISpoke spoke_,
         IGiver giver_,
         IERC20 usdc_,
         ISugarHelper sugar_,
+        ICLFactory factory_,
         address callbackProxy_,
         address reactive_,
         address user_,
         uint256 feedReserve_,
+        uint128 minPoolLiquidity_,
         uint256[] memory reserves_,
         address[] memory pools_
     ) payable AbstractCallback(IPayable(payable(callbackProxy_)), reactive_) {
@@ -189,18 +211,24 @@ contract ShieldVault is AbstractCallback {
         SUGAR = sugar_;
         USER = user_;
         FEED_RESERVE = feedReserve_;
-        if (spoke_.getReserve(USDC_RESERVE).underlying != address(usdc_)) revert BadPool(USDC_RESERVE);
+        MIN_POOL_LIQUIDITY = minPoolLiquidity_;
+        if (spoke_.getReserve(USDC_RESERVE).underlying != address(usdc_) || spoke_.getReserve(USDC_RESERVE).decimals != 6) {
+            revert BadPool(USDC_RESERVE);
+        }
         for (uint256 i; i < reserves_.length; ++i) {
             address p = pools_[i];
             if (p == address(0)) continue;
-            address stock = spoke_.getReserve(reserves_[i]).underlying;
+            ISpoke.Reserve memory res = spoke_.getReserve(reserves_[i]);
             address t0 = ICLPool(p).token0();
             address t1 = ICLPool(p).token1();
             bool u0 = t0 == address(usdc_);
-            if (!(u0 && t1 == stock) && !(t0 == stock && t1 == address(usdc_))) revert BadPool(reserves_[i]);
+            if (
+                (!(u0 && t1 == res.underlying) && !(t0 == res.underlying && t1 == address(usdc_)))
+                    || ICLPool(p).factory() != address(factory_) || factory_.getPool(t0, t1, ICLPool(p).tickSpacing()) != p
+            ) revert BadPool(reserves_[i]);
             poolOf[reserves_[i]] = p;
             usdc0[p] = u0;
-            stockDec[p] = spoke_.getReserve(reserves_[i]).decimals;
+            stockDec[p] = res.decimals;
         }
     }
 
@@ -216,16 +244,13 @@ contract ShieldVault is AbstractCallback {
     }
 
     /// @notice Take USDC back. Touches nothing but this balance: works with the oracle, Giver or Reactive broken.
-    function withdraw(uint256 amount) public onlyUser nonReentrant {
-        if (amount > reserve) revert Insufficient();
-        reserve -= amount;
-        if (!USDC.transfer(USER, amount)) revert TransferFailedUSDC();
-        emit Withdrawn(amount);
+    function withdraw(uint256 amount) external onlyUser nonReentrant {
+        _withdraw(amount);
     }
 
     /// @notice Switch the automaton on (or re-confirm) with a rule and a total spending budget.
     ///         Replaces the remaining budget; keeps the cooldown clock.
-    function activate(Rule calldata r, uint256 budget_) external onlyUser {
+    function activate(Rule calldata r, uint256 budget_) external onlyUser nonReentrant {
         if (
             r.triggerHF < 1e18 || r.targetHF <= r.triggerHF || r.targetHF > 3e18 || r.cooldown < MIN_COOLDOWN
                 || r.haircutBps > 2000 || r.maxRepay < MIN_REPAY || r.maxAeroRepay > r.maxRepay
@@ -236,47 +261,51 @@ contract ShieldVault is AbstractCallback {
         emit Activated(r, budget_);
     }
 
-    function stop() public onlyUser {
+    function stop() external onlyUser nonReentrant {
+        _stop();
+    }
+
+    /// @notice Switch off and take the whole reserve back. A repay already sent to the network may still land first.
+    function stopAndWithdraw() external onlyUser nonReentrant {
+        _stop();
+        _withdraw(reserve);
+    }
+
+    function _stop() internal {
         active = false;
         emit Stopped();
     }
 
-    /// @notice Switch off and take the whole reserve back. A repay already sent to the network may still land first.
-    function stopAndWithdraw() external {
-        stop();
-        withdraw(reserve);
+    function _withdraw(uint256 amount) internal {
+        if (amount > reserve) revert Insufficient();
+        if (amount == 0) return;
+        reserve -= amount;
+        if (!USDC.transfer(USER, amount)) revert TransferFailedUSDC();
+        emit Withdrawn(amount);
     }
 
     // ------------------------------------------------------------------ automaton
 
     /// @notice Anyone may call. Repays only when the borrower's own rule says so, only from the borrower's reserve.
+    ///         Reverts with the reason when there is nothing to do.
     function protect() external nonReentrant returns (uint256 spent) {
-        return _protect();
+        Status st;
+        (st, spent) = _run();
+        if (st != Status.Repaid) revert NotProtected(st);
     }
 
-    /// @notice Reactive Network timer. Never reverts on "nothing to do" so a quiet tick costs only gas.
-    function protectByReactive(address rvm) external onlyServiceProvider onlyCallbackSender(rvm) {
-        if (locked != 1) revert Reentrancy();
-        locked = 2;
-        try this.protectSelf() {} catch (bytes memory err) {
-            emit Skipped(err.length >= 4 ? bytes4(err) : bytes4(0));
-        }
-        locked = 1;
+    /// @notice Reactive Network timer. A quiet tick logs why it did nothing instead of reverting.
+    function protectByReactive(address rvm) external onlyServiceProvider onlyCallbackSender(rvm) nonReentrant {
+        (Status st,) = _run();
+        if (st != Status.Repaid) emit Skipped(st);
     }
 
-    /// @dev Only the vault itself (from `protectByReactive`), so the Reactive path can catch a revert.
-    function protectSelf() external {
-        if (msg.sender != address(this)) revert NotUser();
-        _protect();
-    }
-
-    function _protect() internal returns (uint256 spent) {
-        if (!active) revert Inactive();
-        Rule memory r = rule;
+    function _run() internal returns (Status, uint256) {
+        if (!active) return (Status.Inactive, 0);
         Stress memory s = stress();
-        if (s.market == 2) revert DataFault();
-        if (s.debt == 0 || s.stressHF >= r.triggerHF) revert Healthy();
-        if (block.timestamp < lastProtect + r.cooldown) revert Cooldown();
+        if (s.status != Status.Repaid) return (s.status, 0);
+        Rule memory r = rule;
+        if (block.timestamp < lastProtect + r.cooldown) return (Status.Cooldown, 0);
 
         bool aeroDriven = s.aaveOnlyHF >= r.triggerHF;
         uint256 amount = s.repay;
@@ -284,28 +313,52 @@ contract ShieldVault is AbstractCallback {
         if (amount > cap) amount = cap;
         if (amount > reserve) amount = reserve;
         if (amount > budget) amount = budget;
-        if (amount < MIN_REPAY) revert NothingToRepay();
+        if (amount < MIN_REPAY) return (Status.NothingToRepay, 0);
 
         uint256 before = USDC.balanceOf(address(this));
-        USDC.approve(address(GIVER), amount);
-        (, uint256 repaid) = GIVER.repayOnBehalfOf(address(SPOKE), USDC_RESERVE, amount, USER);
-        USDC.approve(address(GIVER), 0);
-        spent = before - USDC.balanceOf(address(this));
+        if (!USDC.approve(address(GIVER), amount)) revert TransferFailedUSDC();
+        uint256 repaid;
+        try GIVER.repayOnBehalfOf(address(SPOKE), USDC_RESERVE, amount, USER) returns (uint256, uint256 rep) {
+            repaid = rep;
+        } catch {
+            if (!USDC.approve(address(GIVER), 0)) revert TransferFailedUSDC();
+            return (Status.GiverFailed, 0);
+        }
+        if (!USDC.approve(address(GIVER), 0) || USDC.allowance(address(this), address(GIVER)) != 0) {
+            revert TransferFailedUSDC();
+        }
+        uint256 spent = before - USDC.balanceOf(address(this));
         if (spent != repaid || spent == 0 || spent > amount) revert GiverMismatch(spent, repaid);
 
         reserve -= spent;
         budget -= spent;
         lastProtect = block.timestamp;
-        emit Protected(spent, s.stressHF, SPOKE.getUserAccountData(USER).healthFactor, aeroDriven);
+        uint256 hfAfter; // 0 = could not be read; never undoes the repay
+        try SPOKE.getUserAccountData{gas: HF_GAS}(USER) returns (ISpoke.UserAccountData memory d) {
+            hfAfter = d.healthFactor;
+        } catch {}
+        emit Protected(USER, spent, s.stressHF, hfAfter, aeroDriven);
+        return (Status.Repaid, spent);
     }
 
     // ------------------------------------------------------------------ views
 
-    /// @notice 0 open (Aave price is live), 1 closed (feed asleep in the weekend window), 2 data fault (asleep in session).
+    /// @notice 0 open (Aave price is live), 1 closed (feed asleep in the weekend window), 2 data fault
+    ///         (feed unreadable, zero / future time, non-positive price, or asleep in session).
     function marketState() public view returns (uint8) {
-        (,,, uint256 updatedAt,) = IFeed(ORACLE.getReserveSource(FEED_RESERVE)).latestRoundData();
-        if (block.timestamp - updatedAt <= STALE_AFTER) return 0;
-        return inWeekendWindow(block.timestamp) ? 1 : 2;
+        address src;
+        try ORACLE.getReserveSource{gas: FEED_GAS}(FEED_RESERVE) returns (address a) {
+            src = a;
+        } catch {
+            return 2;
+        }
+        try IFeed(src).latestRoundData{gas: FEED_GAS}() returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
+            if (answer <= 0 || updatedAt == 0 || updatedAt > block.timestamp) return 2;
+            if (block.timestamp - updatedAt <= STALE_AFTER) return 0;
+            return inWeekendWindow(block.timestamp) ? 1 : 2;
+        } catch {
+            return 2;
+        }
     }
 
     /// @notice Friday 20:00 UTC to Monday 01:30 UTC (pilot window; DST and holidays are not handled).
@@ -318,59 +371,81 @@ contract ShieldVault is AbstractCallback {
         return false;
     }
 
-    /// @notice Health under stress and the repay that brings it back to target. Same math as Aave's own HF
-    ///         (checked against getUserAccountData when there is no stress).
+    /// @notice Health under stress and the repay that brings it back to target. With the market open this is
+    ///         Aave's own HF (same formula; checked against getUserAccountData on a fork).
     function stress() public view returns (Stress memory s) {
-        s.market = marketState();
         s.debt = SPOKE.getUserTotalDebt(USDC_RESERVE, USER);
-        if (s.debt == 0) return s;
+        if (s.debt == 0) {
+            s.status = Status.Healthy;
+            return s;
+        }
+        s.market = marketState();
+        if (s.market == 2) {
+            s.status = Status.DataFault;
+            return s;
+        }
         uint256 usdcPrice = ORACLE.getReservePrice(USDC_RESERVE);
         uint256 haircut = s.market == 1 ? rule.haircutBps : 0;
         // Pools only while the market is closed: on weekdays they trade a little under Chainlink and would trigger for nothing.
-        (uint256 cStress, uint256 cAave) = _collateral(usdcPrice, haircut, s.market == 1);
+        (uint256 cStress, uint256 cAave, bool ok) = _collateral(usdcPrice, haircut, s.market == 1);
+        if (!ok) {
+            s.status = Status.Unsupported;
+            return s;
+        }
         uint256 debtValue = s.debt * usdcPrice * 1e12; // 6-dec USDC to the 1e26-per-$ scale
         s.stressHF = cStress.mulDiv(1e18, debtValue);
         s.aaveOnlyHF = cAave.mulDiv(1e18, debtValue);
-        uint256 target = rule.targetHF;
-        if (target == 0) return s;
-        uint256 allowed = cStress.mulDiv(1e18, target * usdcPrice * 1e12); // floor: never repay less than needed
-        if (s.debt > allowed) s.repay = s.debt - allowed;
+        if (s.stressHF >= rule.triggerHF) {
+            s.status = Status.Healthy;
+            return s;
+        }
+        uint256 allowed = cStress.mulDiv(1e18, uint256(rule.targetHF) * usdcPrice * 1e12); // floor
+        if (s.debt > allowed) s.repay = s.debt - allowed; // so the repay rounds up, by at most 1 unit
+        s.status = Status.Repaid;
     }
 
     /// @dev Σ supplied × price × CF over the user's enabled collateral, in Aave's 1e26-per-$ value scale.
+    ///      `ok` is false for a position this pilot does not handle (debt outside USDC, USDC as collateral).
     function _collateral(uint256 usdcPrice, uint256 haircutBps, bool usePools)
         internal
         view
-        returns (uint256 cStress, uint256 cAave)
+        returns (uint256 cStress, uint256 cAave, bool ok)
     {
         uint256 n = SPOKE.getReserveCount();
         for (uint256 r; r < n; ++r) {
             (bool collateral, bool borrowing) = SPOKE.getUserReserveStatus(r, USER);
-            if (borrowing && r != USDC_RESERVE) revert OtherDebt();
-            if (!collateral || r == USDC_RESERVE) continue;
+            if (r == USDC_RESERVE) {
+                if (collateral) return (0, 0, false);
+                continue;
+            }
+            if (borrowing) return (0, 0, false);
+            if (!collateral) continue;
             uint256 amt = SPOKE.getUserSuppliedAssets(r, USER);
             if (amt == 0) continue;
             uint256 cf = SPOKE.getDynamicReserveConfig(r, SPOKE.getUserPosition(r, USER).dynamicConfigKey).collateralFactor;
-            uint256 dec = SPOKE.getReserve(r).decimals;
+            uint256 scale = 10 ** (18 - uint256(SPOKE.getReserve(r).decimals));
             uint256 pAave = ORACLE.getReservePrice(r) * (10_000 - haircutBps) / 10_000;
             uint256 p = pAave;
             address pool = poolOf[r];
             if (usePools && pool != address(0)) {
-                try this.poolPriceUSD(pool, usdcPrice) returns (uint256 pPool) {
+                try this.poolPriceUSD{gas: POOL_GAS}(pool, usdcPrice) returns (uint256 pPool) {
                     if (pPool != 0 && pPool < p) p = pPool;
-                } catch {} // no usable history: Aave branch only
+                } catch {} // thin pool or short history: this stock on Aave's price only
             }
-            uint256 scale = 10 ** (18 - dec);
             cStress += amt * p * scale * cf / 10_000;
             cAave += amt * pAave * scale * cf / 10_000;
         }
+        ok = true;
     }
 
     /// @notice 60-min TWAP of the stock in its Aero USDC pool, in 8-dec USD (USDC quote × Aave's USDC price).
+    ///         Reverts when the pool is thinner than MIN_POOL_LIQUIDITY or has no 60-min history.
     function poolPriceUSD(address pool, uint256 usdcPrice) external view returns (uint256) {
+        if (ICLPool(pool).liquidity() < MIN_POOL_LIQUIDITY) revert BadPool(0);
         uint32[] memory ago = new uint32[](2);
         ago[0] = TWAP_WINDOW;
         (int56[] memory cum,) = ICLPool(pool).observe(ago);
+        if (cum.length != 2) revert BadPool(0);
         int56 delta = cum[1] - cum[0];
         int24 tick = int24(delta / int56(uint56(TWAP_WINDOW)));
         if (delta < 0 && delta % int56(uint56(TWAP_WINDOW)) != 0) tick--;
