@@ -143,4 +143,41 @@ contract ShieldReactiveTest is Test {
         assertTrue(rx.inWeekendWindow(1795397399)); // Mon 01:29:59
         assertFalse(rx.inWeekendWindow(1795397400));
     }
+
+    function test_restartAndNewVaultCheckOnFirstTick() public {
+        _tick();
+        assertEq(sys.reqCount(), 1);
+        rx.stop();
+        rx.start(TICK, 15 minutes, 1 hours);
+        _skip(17 minutes);
+        _tick();
+        assertEq(sys.reqCount(), 2, "restart checks at once");
+        rx.setVault(makeAddr("vault2"));
+        _skip(17 minutes);
+        _tick();
+        assertEq(sys.reqCount(), 3, "new vault checked at once");
+        assertEq(sys.req(2).recipient, makeAddr("vault2"));
+    }
+
+    function test_mondayReopenNotDelayed() public {
+        clock = 1795396800; // Mon 23 Nov 01:20 UTC, inside the window
+        vm.warp(clock);
+        _tick();
+        _skip(17 minutes); // 01:37, window closed, last check was in the weekend
+        _tick();
+        assertEq(sys.reqCount(), 2, "first weekday tick still at weekend pace");
+        _skip(17 minutes);
+        _tick();
+        assertEq(sys.reqCount(), 2, "then hourly");
+    }
+
+    function test_wrongChainIgnored() public {
+        IReactive.LogRecord memory l;
+        l.chainId = 1;
+        l.contractAddress = CRON;
+        l.topic0 = TICK;
+        vm.prank(SYSTEM);
+        rx.react(l);
+        assertEq(sys.reqCount(), 0);
+    }
 }

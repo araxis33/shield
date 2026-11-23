@@ -366,8 +366,11 @@ contract ShieldVaultTest is Test {
         assertEq(vault.reserve(), 1_000e6);
         assertEq(vault.lastProtect(), 0);
         // the Reactive path swallows it and only logs
+        vm.expectEmit(address(vault));
+        emit ShieldVault.Skipped(ShieldVault.Status.GiverFailed);
         vm.prank(PROXY);
         vault.protectByReactive(rvm);
+        assertEq(USDC.allowance(address(vault), address(GIVER)), 0, "no allowance left after the callback");
         assertEq(vault.reserve(), 1_000e6);
         assertEq(USDC.balanceOf(address(vault)), 1_000e6);
     }
@@ -384,11 +387,12 @@ contract ShieldVaultTest is Test {
     }
 
     function test_forgedCallbacksRejected() public {
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSignature("NotAuthorized(address,address)", address(this), PROXY));
         vault.protectByReactive(rvm); // not the proxy
+        address other = makeAddr("someoneElse");
         vm.prank(PROXY);
-        vm.expectRevert();
-        vault.protectByReactive(makeAddr("someoneElse")); // proxy, wrong Reactive contract
+        vm.expectRevert(abi.encodeWithSignature("CallbackNotAuthorized(address,address)", other, rvm));
+        vault.protectByReactive(other); // proxy, wrong Reactive contract
 
     }
 
@@ -482,6 +486,8 @@ contract ShieldVaultTest is Test {
 
     function test_thinPoolFallsBackToAave() public {
         goWeekend();
+        ShieldVault.Stress memory s0 = vault.stress();
+        assertLt(s0.stressHF, s0.aaveOnlyHF, "control: the real pools are read and price a little under Aave");
         for (uint256 i; i < pools.length; ++i) {
             vm.mockCall(pools[i], abi.encodeWithSignature("liquidity()"), abi.encode(uint128(1)));
         }
@@ -506,5 +512,47 @@ contract ShieldVaultTest is Test {
         p[0] = pools[1]; // another stock's pool
         vm.expectRevert(abi.encodeWithSelector(ShieldVault.BadPool.selector, r[0]));
         new ShieldVault(SPOKE, GIVER, USDC, SUGAR, FACTORY, PROXY, rvm, user, coll, 1e12, r, p);
+    }
+
+    function test_giverAmountMismatchRevertsEverything() public {
+        uint256 h = hf();
+        fund(1_000e6, true);
+        activate(h + 0.1e18, h + 0.2e18, 1_000e6, 0, 1_000e6);
+        // Giver claims it repaid without taking any USDC
+        vm.mockCall(address(GIVER), abi.encodeWithSignature("repayOnBehalfOf(address,uint256,uint256,address)"), abi.encode(uint256(1), uint256(5e6)));
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.GiverMismatch.selector, uint256(0), uint256(5e6)));
+        vault.protect();
+        assertEq(vault.reserve(), 1_000e6);
+        assertEq(vault.budget(), 1_000e6);
+        assertEq(vault.lastProtect(), 0);
+        assertEq(USDC.allowance(address(vault), address(GIVER)), 0);
+        assertEq(USDC.balanceOf(address(vault)), 1_000e6);
+    }
+
+    function test_allowanceZeroAfterRepay() public {
+        uint256 h = hf();
+        fund(100_000e6, true);
+        activate(h + 0.1e18, h + 0.2e18, 100_000e6, 0, 100_000e6);
+        vault.protect();
+        assertEq(USDC.allowance(address(vault), address(GIVER)), 0);
+    }
+
+    function test_zeroLiquidityFloorRejected() public {
+        vm.expectRevert(abi.encodeWithSelector(ShieldVault.BadPool.selector, uint256(0)));
+        new ShieldVault(SPOKE, GIVER, USDC, SUGAR, FACTORY, PROXY, rvm, user, coll, 0, reserves, pools);
+    }
+
+    function test_callbackAfterStopAndTopUpDoesNothing() public {
+        uint256 h = hf();
+        fund(1_000e6, true);
+        activate(h + 0.1e18, h + 0.2e18, 1_000e6, 0, 1_000e6);
+        vm.prank(user);
+        vault.stop();
+        fund(500e6, false);
+        vm.expectEmit(address(vault));
+        emit ShieldVault.Skipped(ShieldVault.Status.Inactive);
+        vm.prank(PROXY);
+        vault.protectByReactive(rvm);
+        assertEq(vault.reserve(), 1_500e6);
     }
 }

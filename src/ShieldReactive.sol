@@ -49,6 +49,7 @@ contract ShieldReactive is AbstractReactive {
     function setVault(address vault_) external onlyDeployer {
         if (vault_ == address(0)) revert VaultNotSet();
         vault = vault_;
+        lastCheck = 0; // a new vault is checked on the next tick
         emit VaultSet(vault_);
     }
 
@@ -59,6 +60,7 @@ contract ShieldReactive is AbstractReactive {
         cronTopic = cronTopic_;
         weekendEvery = weekendEvery_;
         weekdayEvery = weekdayEvery_;
+        lastCheck = 0; // first tick after start always checks
         SYSTEM.subscribe(block.chainid, CRON, cronTopic_, REACTIVE_IGNORE, REACTIVE_IGNORE, REACTIVE_IGNORE);
         emit ClockStarted(cronTopic_, weekendEvery_, weekdayEvery_);
     }
@@ -88,10 +90,12 @@ contract ShieldReactive is AbstractReactive {
     }
 
     function react(LogRecord calldata log_) external onlySystem {
-        if (log_.contractAddress != CRON || cronTopic == 0 || log_.topic0 != cronTopic) return;
+        if (log_.chainId != block.chainid || log_.contractAddress != CRON || cronTopic == 0 || log_.topic0 != cronTopic) return;
         uint64 now_ = uint64(block.timestamp);
         bool weekend = inWeekendWindow(now_);
-        if (now_ < lastCheck + (weekend ? weekendEvery : weekdayEvery)) return;
+        // the weekend pace also covers the first weekday tick, so the Monday reopen is not left to an hourly wait
+        uint32 every = weekend || inWeekendWindow(lastCheck) ? weekendEvery : weekdayEvery;
+        if (now_ < lastCheck + every) return;
         lastCheck = now_;
         SYSTEM.requestCallbackV_1_0(
             ISystemContract.CallbackConfiguration_V_1_0({

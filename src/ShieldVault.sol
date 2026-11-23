@@ -123,8 +123,8 @@ contract ShieldVault is AbstractCallback {
     }
 
     struct Stress {
-        Status status; // Repaid here means "would act"
-        uint8 market; // 0 open, 1 closed, 2 data fault
+        Status status; // Repaid here means "the rule calls for a repay" (caps, reserve, budget, cooldown not applied)
+        uint8 market; // 0 open, 1 closed, 2 data fault, 3 not checked (no debt)
         uint256 debt; // USDC units, drawn + premium
         uint256 stressHF; // WAD
         uint256 aaveOnlyHF; // WAD, same but without the pool prices
@@ -139,6 +139,8 @@ contract ShieldVault is AbstractCallback {
     uint256 internal constant FEED_GAS = 100_000;
     uint256 internal constant POOL_GAS = 250_000;
     uint256 internal constant HF_GAS = 400_000;
+    uint256 internal constant GIVER_GAS = 700_000; // measured repay path ~0.15M
+    uint256 internal constant FINISH_GAS = 120_000; // allowance reset, bookkeeping, event, lock release
 
     ISpoke public immutable SPOKE;
     IAaveOracle public immutable ORACLE;
@@ -212,6 +214,7 @@ contract ShieldVault is AbstractCallback {
         USER = user_;
         FEED_RESERVE = feedReserve_;
         MIN_POOL_LIQUIDITY = minPoolLiquidity_;
+        if (minPoolLiquidity_ == 0 && pools_.length != 0) revert BadPool(0);
         if (spoke_.getReserve(USDC_RESERVE).underlying != address(usdc_) || spoke_.getReserve(USDC_RESERVE).decimals != 6) {
             revert BadPool(USDC_RESERVE);
         }
@@ -315,10 +318,11 @@ contract ShieldVault is AbstractCallback {
         if (amount > budget) amount = budget;
         if (amount < MIN_REPAY) return (Status.NothingToRepay, 0);
 
+        if (gasleft() < GIVER_GAS + HF_GAS + 2 * FINISH_GAS) return (Status.GiverFailed, 0); // not enough gas to finish cleanly
         uint256 before = USDC.balanceOf(address(this));
         if (!USDC.approve(address(GIVER), amount)) revert TransferFailedUSDC();
         uint256 repaid;
-        try GIVER.repayOnBehalfOf(address(SPOKE), USDC_RESERVE, amount, USER) returns (uint256, uint256 rep) {
+        try GIVER.repayOnBehalfOf{gas: GIVER_GAS}(address(SPOKE), USDC_RESERVE, amount, USER) returns (uint256, uint256 rep) {
             repaid = rep;
         } catch {
             if (!USDC.approve(address(GIVER), 0)) revert TransferFailedUSDC();
@@ -377,6 +381,7 @@ contract ShieldVault is AbstractCallback {
         s.debt = SPOKE.getUserTotalDebt(USDC_RESERVE, USER);
         if (s.debt == 0) {
             s.status = Status.Healthy;
+            s.market = 3;
             return s;
         }
         s.market = marketState();
