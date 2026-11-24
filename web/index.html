@@ -89,6 +89,18 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     <div id="st-repay" class="status"></div>
   </section>
 
+  <section class="card" id="auto" hidden>
+    <h2>Automatic protection</h2>
+    <p class="small dim">Your own Shield vault on Base (<a id="vaultLink" href="#">vault</a>). A Reactive Network timer wakes it every ~17 min over the weekend and about hourly on weekdays; when your health factor is under the trigger it repays your Aave USDC debt from the reserve you leave here. You can stop and take the reserve back at any time.</p>
+    <ol class="notes" id="steps">
+      <li><span id="s1">–</span> <button id="b1" class="ghost" disabled>Allow</button><br><span class="small dim">Lets Aave's own Giver contract repay your debt with USDC someone else pays. It can only add to your position, never take from it.</span></li>
+      <li><span id="s2">–</span> <span class="row" style="display:inline-flex"><input id="amt" value="2" size="6" inputmode="decimal"> USDC <button id="b2" class="ghost" disabled>Put in reserve</button></span><br><span class="small dim">Two signatures: allow exactly this amount, then deposit it.</span></li>
+      <li><span id="s3">–</span> <button id="b3" class="ghost" disabled>Switch on</button><br><span class="small dim" id="ruleText"></span></li>
+    </ol>
+    <div class="row" style="margin-top:8px"><button id="b4" class="ghost" disabled>Stop and take the reserve back</button></div>
+    <div id="st-auto" class="status"></div>
+  </section>
+
   <section class="card small dim">
     <b>How it reads</b>
     <ul class="notes">
@@ -128,6 +140,16 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     dynConfig: "0xec17bb00", supplied: "0xf1568a89", debt: "0x9b7172a6", oracle: "0x38013f02", price: "0xd45c35ff",
     source: "0xe4337e38", latestRound: "0xfeaf968c", observe: "0x883bdbfd", token0: "0x0dfe1681", token1: "0xd21220a7",
     repay: "0xb1e8f8ef", approve: "0x095ea7b3", allowance: "0xdd62ed3e", balanceOf: "0x70a08231", symbol: "0x95d89b41",
+  };
+  // ---- automatic protection: one vault per borrower (pilot), filled in after deployment ----
+  const GIVER = "0x9e81c2fde4e34cab3ab1667ca3c932dbaed95f08";
+  const VAULTS = {}; // borrower (lowercase) -> ShieldVault address
+  const LOCAL_VAULT = LOCAL && new URLSearchParams(location.search).get("vault"); // rehearsal on a fork only
+  // the pilot rule: trigger 1.70, target 2.20, 15-min cooldown, no haircut, at most $1.50 a repay, Aero-only repays off; budget $1.50
+  const RULE = { trigger: 1700000000000000000n, target: 2200000000000000000n, cooldown: 900n, haircut: 0n, maxRepay: 1500000n, maxAero: 0n, budget: 1500000n };
+  const VSEL = {
+    setManager: "0x8874e104", isManager: "0x2630faab", reserve: "0xcd3293de", budget: "0xed01bf29", active: "0x02fb0c5e",
+    lastProtect: "0x8bdfcb59", deposit: "0xb6b55f25", activate: "0xcc01fb5b", stopAndWithdraw: "0x4b70c2f2", user: "0x81e167cf", usdc: "0x89a30271", spoke: "0x5c94327c", giver: "0x08bd6e7e", rule: "0x25e3d522",
   };
   const el = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -390,7 +412,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   async function check() {
     const a = el("addr").value.trim();
     st.epoch++; // any operation started for an earlier snapshot is now stale
-    if (!isAddr(a)) { st.data = null; el("view").hidden = true; el("fix").hidden = true; status("st-read", "Paste a full 0x address.", true); return; }
+    if (!isAddr(a)) { st.data = null; el("view").hidden = true; el("fix").hidden = true; el("auto").hidden = true; status("st-read", "Paste a full 0x address.", true); return; }
     if (st.busy) return;
     st.busy = true; el("check").disabled = true;
     status("st-read", "Reading the position on Base…");
@@ -402,11 +424,13 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
       st.data = d;
       status("st-read", "");
       render();
+      await refreshAuto();
       try { history.replaceState(null, "", "#" + a); } catch (e) {}
     } catch (e) {
-      st.data = null; el("view").hidden = true; el("fix").hidden = true;
+      st.data = null; el("view").hidden = true; el("fix").hidden = true; el("auto").hidden = true;
       status("st-read", "Could not read the position, nothing is shown: " + esc(e.message), true);
-    } finally { st.busy = false; el("check").disabled = false; }
+      try { await refreshAuto(a); } catch (e2) {}
+    } finally { st.busy = false; el("check").disabled = false; if (st.auto && !el("auto").hidden) renderAuto(st.auto); }
   }
 
   // ---- wallet ----
@@ -446,6 +470,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     await assertContext(op);
     if (!(await settlePending())) throw new Error("An earlier transaction (maybe from another tab) is still waiting. Nothing was sent. Press Check once it is final.");
     const nonce = BigInt(await rpc("eth_getTransactionCount", [op.from, "latest"]));
+    await assertContext(op);
     const hash = await provider().request({ method: "eth_sendTransaction", params: [{ from: op.from, to, data }] });
     if (!isHash(hash)) throw new Error("The wallet returned no transaction hash.");
     op.hashes.push(hash);
@@ -541,12 +566,107 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
     }
   }
 
+  // ---- automatic protection ----
+  const vaultOf = (user) => (LOCAL_VAULT && isAddr(LOCAL_VAULT) ? LOCAL_VAULT.toLowerCase() : VAULTS[user] || null);
+  async function readAuto(user, vault) {
+    const block = await rpc("eth_blockNumber", []);
+    const one = async (data) => big((await callW(vault, data, block))[0]);
+    const who = async (data) => asAddr((await callW(vault, data, block))[0]);
+    if ((await who(VSEL.user)) !== user) throw new Error("That vault belongs to another address.");
+    if ((await who(VSEL.usdc)) !== USDC || (await who(VSEL.spoke)) !== SPOKE.toLowerCase() || (await who(VSEL.giver)) !== GIVER) throw new Error("That address is not a Shield vault for this Aave market.");
+    const r = await callW(vault, VSEL.rule, block);
+    return {
+      user, vault,
+      giver: big((await callW(SPOKE, VSEL.isManager + addr(user) + addr(GIVER), block))[0]) === 1n,
+      reserve: await one(VSEL.reserve), budget: await one(VSEL.budget), active: (await one(VSEL.active)) === 1n,
+      lastProtect: await one(VSEL.lastProtect),
+      allowance: big((await callW(USDC, SEL.allowance + addr(user) + addr(vault), block))[0]),
+      rule: { trigger: big(r[0]), target: big(r[1]), cooldown: big(r[2]), maxRepay: big(r[4]) },
+    };
+  }
+  function renderAuto(a) {
+    const mine = !!(st.account && st.account.toLowerCase() === a.user);
+    const busy = st.busy || !!st.pending;
+    el("vaultLink").href = "https://basescan.org/address/" + a.vault; el("vaultLink").textContent = a.vault.slice(0, 6) + "…" + a.vault.slice(-4);
+    el("s1").textContent = a.giver ? "Giver allowed ✓" : "Allow Aave's Giver to repay for you.";
+    el("s2").textContent = a.reserve > 0n ? "Reserve: " + usdc6(a.reserve, true) + " USDC ✓" : "Leave a USDC reserve in your vault.";
+    el("s3").textContent = a.active ? "On ✓ (budget left " + usdc6(a.budget, true) + " USDC" + (a.lastProtect > 0n ? ", last repay " + new Date(Number(a.lastProtect) * 1000).toUTCString().slice(5, 22) + " UTC" : "") + ")" : "Switch the automaton on.";
+    const r = a.active ? a.rule : { trigger: RULE.trigger, target: RULE.target, cooldown: RULE.cooldown, maxRepay: RULE.maxRepay };
+    el("ruleText").textContent = (a.active ? "Rule in your vault: " : "Rule: ") + "repay when the health factor is under " + hfText(r.trigger) + ", up to " + hfText(r.target) + "; at most " + usdc6(r.maxRepay) + " USDC a repay, at most one repay every " + (Number(r.cooldown) / 60) + " min" + (a.active ? "." : ", 1.50 USDC in total until you confirm again.") + (a.allowance > 0n ? " Your vault may still take " + usdc6(a.allowance, true) + " USDC you allowed; the next deposit uses it first." : "");
+    el("b1").disabled = !mine || busy || a.giver;
+    el("b2").disabled = !mine || busy;
+    el("b3").disabled = !mine || busy || !a.giver || a.reserve === 0n || (a.active && a.budget >= 1000000n);
+    el("b3").textContent = a.active ? "Confirm again (1.50 USDC budget)" : "Switch on";
+    el("b4").disabled = !mine || busy || (a.reserve === 0n && !a.active);
+    if (!mine) status("st-auto", "Connect this borrower's wallet to change the vault.");
+    else if (/Connect this borrower/.test(el("st-auto").textContent)) status("st-auto", "");
+  }
+  async function refreshAuto(userArg) {
+    const user = (userArg || (st.data && st.data.user) || "").toLowerCase(); const vault = user && vaultOf(user);
+    st.auto = null; [1, 2, 3, 4].forEach((n) => (el("b" + n).disabled = true));
+    if (!vault) { el("auto").hidden = true; return; }
+    const epoch = st.epoch;
+    try {
+      const a = await readAuto(user, vault);
+      if (epoch !== st.epoch || el("addr").value.trim().toLowerCase() !== user) return; // the address changed while reading
+      st.auto = a; el("auto").hidden = false; renderAuto(a);
+    } catch (e) { el("auto").hidden = false; status("st-auto", "Could not read the vault: " + esc(e.message), true); }
+  }
+  function parseUsdc(s) {
+    const m = /^\s*(\d{1,7})(?:\.(\d{1,6}))?\s*$/.exec(s || "");
+    if (!m) return null;
+    return BigInt(m[1]) * 1000000n + BigInt((m[2] || "").padEnd(6, "0"));
+  }
+  async function autoStep(which) {
+    const a = st.auto;
+    if (!a || !st.account || st.account.toLowerCase() !== a.user) throw new Error("Connect this borrower's own wallet.");
+    const op = { from: a.user, user: a.user, epoch: st.epoch, hashes: [] };
+    let done = "";
+    if (which === 1) {
+      status("st-auto", "Signature 1 of 1: allow Aave's Giver as your position manager.");
+      done = (await sendTx(op, SPOKE, VSEL.setManager + addr(GIVER) + word(1), "Giver approval")).link;
+    } else if (which === 2) {
+      const amt = parseUsdc(el("amt").value);
+      if (!amt || amt < 1000000n) throw new Error("Enter at least 1 USDC.");
+      const bal = big((await callW(USDC, SEL.balanceOf + addr(a.user), "latest"))[0]);
+      if (bal < amt) throw new Error("This wallet holds " + usdc6(bal, true) + " USDC on Base, less than " + usdc6(amt, true) + ".");
+      const allowed = big((await callW(USDC, SEL.allowance + addr(a.user) + addr(a.vault), "latest"))[0]);
+      if (allowed < amt) {
+        status("st-auto", "Signature 1 of 2: allow your vault to take exactly " + usdc6(amt, true) + " USDC.");
+        await sendTx(op, USDC, SEL.approve + addr(a.vault) + word(amt), "approval");
+      }
+      status("st-auto", "Signature " + (allowed < amt ? "2 of 2" : "1 of 1") + ": deposit " + usdc6(amt, true) + " USDC into your vault.");
+      done = (await sendTx(op, a.vault, VSEL.deposit + word(amt), "deposit")).link;
+    } else if (which === 3) {
+      status("st-auto", "Signature 1 of 1: switch the automaton on with the rule shown.");
+      const data = VSEL.activate + word(RULE.trigger) + word(RULE.target) + word(RULE.cooldown) + word(RULE.haircut) + word(RULE.maxRepay) + word(RULE.maxAero) + word(RULE.budget);
+      done = (await sendTx(op, a.vault, data, "switch-on")).link;
+    } else if (which === 4) {
+      status("st-auto", "Signature 1 of 1: stop the automaton and send the whole reserve back to this wallet.");
+      done = (await sendTx(op, a.vault, VSEL.stopAndWithdraw, "stop and withdraw")).link;
+    }
+    status("st-auto", "Done: " + done + ". Reading the vault again…", false, true);
+    await refreshAuto(a.user);
+    if (st.auto) status("st-auto", "Done: " + done + ".", false, true);
+    else status("st-auto", "Done: " + done + ". The vault could not be read again; press Check.", true);
+  }
+  [1, 2, 3, 4].forEach((n) => el("b" + n).addEventListener("click", async () => {
+    if (st.busy) return;
+    st.busy = true; if (st.auto) renderAuto(st.auto);
+    try { await autoStep(n); }
+    catch (e) {
+      const m = /rejected|denied/i.test(e.message || "") ? "Cancelled in the wallet. That step was not sent." : e.message;
+      status("st-auto", e.html ? m : esc(m), true);
+    } finally { st.busy = false; if (st.auto) renderAuto(st.auto); }
+  }));
+
   el("check").addEventListener("click", check);
   el("addr").addEventListener("keydown", (e) => { if (e.key === "Enter") check(); });
   el("addr").addEventListener("input", () => {
     st.epoch++; status("st-repay", "");
     const same = st.data && el("addr").value.trim().toLowerCase() === st.data.user;
     el("view").hidden = !same; el("fix").hidden = !same || st.data.debtRay === 0n;
+    if (!same) el("auto").hidden = true;
     renderRepayButton();
   });
   el("gap").addEventListener("change", () => { if (st.data) renderFix(); });
@@ -563,8 +683,8 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   });
   const p = provider();
   if (p && p.on) {
-    p.on("accountsChanged", (a) => { st.epoch++; st.account = a && a[0] ? a[0] : null; el("connect").textContent = st.account ? st.account.slice(0, 6) + "…" + st.account.slice(-4) : "Connect wallet"; renderRepayButton(); });
-    p.on("chainChanged", () => { st.epoch++; status("st-repay", "The wallet changed network. Press Check before repaying."); });
+    p.on("accountsChanged", (a) => { st.epoch++; st.account = a && a[0] ? a[0] : null; el("connect").textContent = st.account ? st.account.slice(0, 6) + "…" + st.account.slice(-4) : "Connect wallet"; renderRepayButton(); if (st.auto) renderAuto(st.auto); });
+    p.on("chainChanged", () => { st.epoch++; st.auto = null; [1, 2, 3, 4].forEach((n) => (el("b" + n).disabled = true)); status("st-repay", "The wallet changed network. Press Check before repaying."); status("st-auto", "The wallet changed network. Press Check again."); });
   }
   const h = location.hash.slice(1);
   if (isAddr(h)) { el("addr").value = h; check(); }
