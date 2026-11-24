@@ -3,3 +3,5 @@ cache/
 research/aave_logs.json
 .demo-state
 .demo-anvil.log
+.live-state
+.env.live
