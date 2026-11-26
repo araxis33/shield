@@ -143,7 +143,7 @@ ul.notes{margin:8px 0 0;padding-left:18px;font-size:13px;color:var(--dim)}
   };
   // ---- automatic protection: one vault per borrower (pilot), filled in after deployment ----
   const GIVER = "0x9e81c2fde4e34cab3ab1667ca3c932dbaed95f08";
-  const VAULTS = {}; // borrower (lowercase) -> ShieldVault address
+  const VAULTS = { "0x2ab08a231389fd6c1cb368769ae5ba3f999209e4": "0xea7f8aa81de0e6eb798467fd6136c192080308f5" }; // borrower (lowercase) -> ShieldVault address
   const LOCAL_VAULT = LOCAL && new URLSearchParams(location.search).get("vault"); // rehearsal on a fork only
   // the pilot rule: trigger 1.70, target 2.20, 15-min cooldown, no haircut, at most $1.50 a repay, Aero-only repays off; budget $1.50
   const RULE = { trigger: 1700000000000000000n, target: 2200000000000000000n, cooldown: 900n, haircut: 0n, maxRepay: 1500000n, maxAero: 0n, budget: 1500000n };
